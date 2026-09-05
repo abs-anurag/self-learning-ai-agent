@@ -105,25 +105,20 @@ The technical ownership is:
 
 Primary responsibilities:
 
-- Overall technical coordination
-- FastAPI
-- API routes
-- Request validation
-- Task creation
-- Task lifecycle
-- Run lifecycle
-- Celery
-- Redis integration
-- Backend integration
-- Docker Compose
-- Infrastructure
-- Environment configuration
-- Deployment support
-- GitHub/repository coordination
+- Overall technical coordination & architecture integrity
+- `backend/core/` (`config.py`, `logging.py`)
+- `backend/api/` (`main.py`, `schemas.py`, `dependencies.py`, `security/`, `ws/`, `routes/`)
+- `backend/worker/` (`celery_app.py`, `tasks.py`)
+- `backend/events/` (`schema.py`, `service.py`, `publisher.py`)
+- `backend/scripts/` (`create_demo_user.py`, `mark_stale_runs_failed.py`)
+- Infrastructure: `docker-compose.yml`, `Makefile`, `.github/`, `infra/`
+- Environment configuration & deployment support
+- Tests: `tests/test_events_schema.py`, `tests/test_event_service.py`, `tests/test_api_auth.py`, `tests/test_graph_limits.py` (jointly with TM2)
+- Docs: `docs/event-schema.md`, `docs/runbook.md`, `docs/api-reference.md`, `docs/known-limitations.md`
 
 Primary branch:
 
-`feature/backend-infra`
+`feature/backend-api`
 
 ---
 
@@ -132,26 +127,15 @@ Primary branch:
 
 Primary responsibilities:
 
-- LangGraph
-- Agent state
-- Agent nodes
-- Understanding
-- Memory retrieval
-- Planning
-- Execution orchestration
-- Observation
-- Evaluation
-- Reflection
-- Replanning
-- PostgreSQL
-- pgvector
-- LangGraph checkpoints
-- Episodic experiences
-- Candidate recipes
-- Trusted recipes
-- Recipe retrieval
-- Recipe promotion
-- Learning logic
+- LangGraph graph topology, `AgentState`, runtime, and checkpoint lifecycle
+- `backend/agent/` (`graph.py`, `state.py`, `prompts.py`, `runtime.py`, `providers/`, `fixtures/`, `nodes/`)
+- `backend/memory/` (`retriever.py`, `embeddings.py`, `experiences.py`)
+- `backend/learning/` (`candidate.py`, `quality_gate.py`, `recipes.py`)
+- `backend/evaluation/` (`scorer.py`, `metrics.py`)
+- `backend/db/` (`models.py`, `session.py`, `migrations/`)
+- PostgreSQL 15 & pgvector schema, indexes, and migrations
+- Tests: `tests/test_graph_limits.py` (jointly with TM1), `tests/test_quality_gate.py`, `tests/test_learning_loop.py`
+- Docs: `docs/architecture.md`
 
 Primary branch:
 
@@ -164,19 +148,12 @@ Primary branch:
 
 Primary responsibilities:
 
-- Calculator
-- File reader
-- Tavily integration
-- Optional code executor
-- Tool security
-- React frontend
-- Dashboard
-- Task submission UI
-- Run/timeline UI
-- Learning visibility
-- Frontend state
-- API integration
-- Client-side authentication handling
+- `backend/tools/` (`registry.py`, `calculator.py`, `file_reader.py`, `web_search.py`, `code_executor.py`)
+- Tool security, AST arithmetic sandboxing, path canonicalization
+- `frontend/` (React 18, Vite, Tailwind CSS, Zustand store, mock event player, WebSocket subscribe-then-replay receiver)
+- Client-side authentication & dashboard UI components
+- Tests: `tests/test_calculator.py`, `tests/test_file_reader.py`, `tests/test_code_executor.py`
+- Docs: `docs/security.md`
 
 Primary branch:
 
@@ -243,41 +220,150 @@ The goal is collaboration, not territorial warfare conducted through Git.
 
 # 5. REPOSITORY STRUCTURE
 
-Expected repository structure:
+Expected repository structure (matching `BLUEPRINT.md` §19):
 
+```text
 self-learning-ai-agent/
-
-├── backend/
-│   ├── app/
-│   │   ├── api/
-│   │   ├── agent/
-│   │   ├── core/
-│   │   ├── db/
-│   │   ├── events/
-│   │   ├── learning/
-│   │   ├── tools/
-│   │   └── workers/
-│   ├── tests/
-│   └── alembic/
-│
-├── frontend/
-│
-├── scripts/
-│
-├── docs/
-│   ├── architecture/
-│   ├── api/
-│   └── development/
-│       └── AI_TEAM_INSTRUCTIONS.md
-│
-├── presentation/
-│
 ├── README.md
 ├── BLUEPRINT.md
 ├── CONTRIBUTING.md
 ├── SECURITY.md
 ├── .env.example
-└── .gitignore
+├── .gitignore
+├── docker-compose.yml
+├── Makefile
+├── .github/
+│   └── workflows/
+│       └── ci.yml
+├── infra/
+│   ├── postgres/
+│   │   └── init.sql
+│   └── redis/
+│       └── redis.conf
+├── backend/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── core/
+│   │   ├── config.py
+│   │   └── logging.py
+│   ├── agent/
+│   │   ├── graph.py
+│   │   ├── state.py
+│   │   ├── prompts.py
+│   │   ├── runtime.py
+│   │   ├── providers/
+│   │   │   ├── base.py
+│   │   │   ├── anthropic.py
+│   │   │   └── fixture.py
+│   │   ├── fixtures/
+│   │   │   ├── run_a_responses.json
+│   │   │   └── run_b_responses.json
+│   │   └── nodes/
+│   │       ├── understand.py
+│   │       ├── retrieve.py
+│   │       ├── plan.py
+│   │       ├── execute.py
+│   │       ├── observe.py
+│   │       ├── evaluate.py
+│   │       ├── reflect.py
+│   │       ├── replan.py
+│   │       ├── learn.py
+│   │       └── respond.py
+│   ├── memory/
+│   │   ├── retriever.py
+│   │   ├── embeddings.py
+│   │   └── experiences.py
+│   ├── learning/
+│   │   ├── candidate.py
+│   │   ├── quality_gate.py
+│   │   └── recipes.py
+│   ├── evaluation/
+│   │   ├── scorer.py
+│   │   └── metrics.py
+│   ├── tools/
+│   │   ├── registry.py
+│   │   ├── calculator.py
+│   │   ├── file_reader.py
+│   │   ├── web_search.py
+│   │   └── code_executor.py
+│   ├── events/
+│   │   ├── schema.py
+│   │   ├── service.py
+│   │   └── publisher.py
+│   ├── worker/
+│   │   ├── celery_app.py
+│   │   └── tasks.py
+│   ├── api/
+│   │   ├── main.py
+│   │   ├── schemas.py
+│   │   ├── dependencies.py
+│   │   ├── security/
+│   │   │   ├── auth.py
+│   │   │   └── rate_limit.py
+│   │   ├── ws/
+│   │   │   └── manager.py
+│   │   └── routes/
+│   │       ├── tasks.py
+│   │       ├── memory.py
+│   │       ├── feedback.py
+│   │       ├── metrics.py
+│   │       ├── health.py
+│   │       └── events.py
+│   ├── scripts/
+│   │   ├── create_demo_user.py
+│   │   └── mark_stale_runs_failed.py
+│   └── db/
+│       ├── models.py
+│       ├── session.py
+│       └── migrations/
+├── frontend/
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   ├── package.json
+│   ├── vite.config.js
+│   └── src/
+│       ├── App.jsx
+│       ├── main.jsx
+│       ├── api/
+│       │   ├── http.js
+│       │   └── ws.js
+│       ├── mocks/
+│       │   └── mockEventStream.js
+│       ├── store/
+│       │   └── agentStore.js
+│       └── components/
+│           ├── TaskInput.jsx
+│           ├── ExecutionStatus.jsx
+│           ├── SafeActivityFeed.jsx
+│           ├── CurrentStep.jsx
+│           ├── ToolsUsed.jsx
+│           ├── EvaluationPanel.jsx
+│           ├── LearningEvents.jsx
+│           ├── TaskHistory.jsx
+│           ├── RecipeBrowser.jsx
+│           ├── MetricsDash.jsx
+│           └── ErrorBanner.jsx
+├── tests/
+│   ├── conftest.py
+│   ├── test_graph_limits.py
+│   ├── test_calculator.py
+│   ├── test_file_reader.py
+│   ├── test_code_executor.py
+│   ├── test_quality_gate.py
+│   ├── test_events_schema.py
+│   ├── test_event_service.py
+│   ├── test_learning_loop.py
+│   └── test_api_auth.py
+└── docs/
+    ├── architecture.md
+    ├── api-reference.md
+    ├── event-schema.md
+    ├── security.md
+    ├── runbook.md
+    ├── known-limitations.md
+    └── development/
+        └── AI_TEAM_INSTRUCTIONS.md
+```
 
 Do not reorganize the repository without a clear reason.
 
@@ -341,7 +427,7 @@ The stable branch is:
 
 Technical branches:
 
-`feature/backend-infra`
+`feature/backend-api`
 
 `feature/agent-memory`
 
@@ -351,7 +437,7 @@ The structure is:
 
 main
 │
-├── feature/backend-infra
+├── feature/backend-api
 ├── feature/agent-memory
 └── feature/tools-frontend
 
