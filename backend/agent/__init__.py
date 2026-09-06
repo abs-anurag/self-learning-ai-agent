@@ -1,9 +1,13 @@
 """
-Agent core package containing state schemas, runtime, and LLM provider abstractions.
+Agent core package containing state schemas, runtime, graph, and LLM provider abstractions.
 
 Source of truth: BLUEPRINT.md §8, §9, §15.
 """
 
+from backend.agent.graph import (
+    build_agent_graph,
+    create_agent_graph,
+)
 from backend.agent.providers import (
     AnthropicProvider,
     FixtureProvider,
@@ -11,6 +15,7 @@ from backend.agent.providers import (
 )
 from backend.agent.runtime import (
     AgentRuntime,
+    get_current_runtime,
     get_llm_provider,
 )
 from backend.agent.state import (
@@ -35,10 +40,13 @@ __all__ = [
     "truncate_observation",
     "route_after_evaluate",
     "AgentRuntime",
+    "get_current_runtime",
     "LLMProvider",
     "AnthropicProvider",
     "FixtureProvider",
     "get_llm_provider",
+    "build_agent_graph",
+    "create_agent_graph",
     "VALID_TASK_TYPES",
     "VALID_LEARNING_DECISIONS",
     "VALID_STATUSES",
