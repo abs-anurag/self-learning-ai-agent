@@ -31,7 +31,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Union
 
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.core.config import ExecutionMode, settings
 from backend.core.logging import get_logger
@@ -86,18 +86,36 @@ def format_recipe_context(recipe: Union[TaskRecipe, dict[str, Any]]) -> str:
 async def increment_recipe_usage(
     session: AsyncSession,
     recipe_id: Union[uuid.UUID, str],
+    *,
+    counter_session_factory: Optional[async_sessionmaker[AsyncSession]] = None,
 ) -> None:
     """
     Concurrency-safe atomic increment of usage_count in PostgreSQL.
     Source: BLUEPRINT.md §11 Concurrency-Safe Recipe Counters.
     """
     rec_uuid = uuid.UUID(str(recipe_id))
-    await session.execute(
+    statement = (
         update(TaskRecipe)
         .where(TaskRecipe.id == rec_uuid)
         .values(usage_count=TaskRecipe.usage_count + 1)
     )
-    await session.flush()
+
+    session_bind = getattr(session, "bind", None)
+    if counter_session_factory is None and session_bind is not None:
+        counter_session_factory = async_sessionmaker(
+            bind=session_bind,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autoflush=False,
+        )
+
+    if counter_session_factory is not None:
+        async with counter_session_factory.begin() as counter_session:
+            await counter_session.execute(statement)
+    else:
+        await session.execute(statement)
+        await session.flush()
+
     logger.debug("Atomically incremented usage_count for recipe %s", rec_uuid)
 
 
@@ -110,6 +128,7 @@ async def retrieve_recipes(
     limit: int = 5,
     similarity_threshold: Optional[float] = None,
     mode: Optional[ExecutionMode] = None,
+    counter_session_factory: Optional[async_sessionmaker[AsyncSession]] = None,
 ) -> list[TaskRecipe]:
     """
     Retrieve eligible trusted recipes according to dual retrieval specification.
@@ -124,32 +143,23 @@ async def retrieve_recipes(
         else settings.RECIPE_SIMILARITY_THRESHOLD
     )
 
-    # 1. Fetch user's candidate trusted recipes with matching task_type
-    # Strict multi-tenancy (§10, §17): Only recipes belonging to authenticated user
-    stmt = (
-        select(TaskRecipe)
-        .where(
-            TaskRecipe.user_id == user_uuid,
-            TaskRecipe.status == RecipeStatus.TRUSTED.value,
-            TaskRecipe.task_type == task_type,
-        )
-        .order_by(TaskRecipe.created_at.desc())
-    )
-    result = await session.execute(stmt)
-    candidates = list(result.scalars().all())
-
-    if not candidates:
-        logger.info(
-            "No trusted recipes found for user %s with task_type %s",
-            user_uuid,
-            task_type,
-        )
-        return []
-
     matching_recipes: list[tuple[float, TaskRecipe]] = []
 
     # 2. Dual Retrieval Logic (Demo vs Live)
     if active_mode == ExecutionMode.DEMO:
+        # Demo Mode: Fetch candidates for deterministic fixture matching.
+        stmt = (
+            select(TaskRecipe)
+            .where(
+                TaskRecipe.user_id == user_uuid,
+                TaskRecipe.status == RecipeStatus.TRUSTED.value,
+                TaskRecipe.task_type == task_type,
+            )
+            .order_by(TaskRecipe.created_at.desc())
+        )
+        result = await session.execute(stmt)
+        candidates = list(result.scalars().all())
+
         # Demo Mode: Deterministic fixture matching (§10, §24)
         goal_lower = goal.lower()
         is_compound_interest = "compound interest" in goal_lower or "compounded" in goal_lower
@@ -168,20 +178,42 @@ async def retrieve_recipes(
                 if sim >= threshold:
                     matching_recipes.append((sim, recipe))
     else:
-        # Live Mode: pgvector cosine similarity calculation (§10)
+        # Live Mode: calculate cosine distance in PostgreSQL so the HNSW index
+        # can support the nearest-neighbor ordering (§10, §18).
         goal_emb = generate_embedding(goal)
-        for recipe in candidates:
-            sim = cosine_similarity(recipe.embedding, goal_emb)
-            if sim >= threshold:
-                matching_recipes.append((sim, recipe))
+        distance = TaskRecipe.embedding.cosine_distance(goal_emb)
+        stmt = (
+            select(TaskRecipe)
+            .where(
+                TaskRecipe.user_id == user_uuid,
+                TaskRecipe.status == RecipeStatus.TRUSTED.value,
+                TaskRecipe.task_type == task_type,
+                distance <= 1.0 - threshold,
+            )
+            .order_by(distance)
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        selected = list(result.scalars().all())
 
-    # Sort by similarity descending
-    matching_recipes.sort(key=lambda x: x[0], reverse=True)
-    selected = [rec for _, rec in matching_recipes[:limit]]
+        if not selected:
+            logger.info(
+                "No trusted recipes found for user %s with task_type %s",
+                user_uuid,
+                task_type,
+            )
+
+    if active_mode == ExecutionMode.DEMO:
+        matching_recipes.sort(key=lambda x: x[0], reverse=True)
+        selected = [rec for _, rec in matching_recipes[:limit]]
 
     # 3. Concurrency-safe atomic increment of usage_count for retrieved recipes (§11)
     for rec in selected:
-        await increment_recipe_usage(session, rec.id)
+        await increment_recipe_usage(
+            session,
+            rec.id,
+            counter_session_factory=counter_session_factory,
+        )
 
     logger.info(
         "Retrieved %d trusted recipe(s) for user %s (mode=%s)",

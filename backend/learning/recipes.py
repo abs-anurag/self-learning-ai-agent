@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.core.config import settings
 from backend.core.logging import get_logger
 from backend.db.models import RecipeCandidate, RecipeStatus, TaskRecipe
-from backend.memory.embeddings import cosine_similarity, generate_embedding
+from backend.memory.embeddings import generate_embedding
 
 logger = get_logger(__name__)
 
@@ -53,24 +53,30 @@ async def find_duplicate_recipe(
         else settings.RECIPE_DUPLICATE_THRESHOLD
     )
 
-    stmt = select(TaskRecipe).where(
-        TaskRecipe.user_id == user_uuid,
-        TaskRecipe.task_type == task_type,
-        TaskRecipe.status == RecipeStatus.TRUSTED.value,
+    distance = TaskRecipe.embedding.cosine_distance(candidate_embedding)
+    stmt = (
+        select(TaskRecipe, distance.label("cosine_distance"))
+        .where(
+            TaskRecipe.user_id == user_uuid,
+            TaskRecipe.task_type == task_type,
+            TaskRecipe.status == RecipeStatus.TRUSTED.value,
+            distance <= 1.0 - dup_threshold,
+        )
+        .order_by(distance)
+        .limit(1)
     )
     result = await session.execute(stmt)
-    existing_recipes = list(result.scalars().all())
-
-    for recipe in existing_recipes:
-        sim = cosine_similarity(recipe.embedding, candidate_embedding)
-        if sim >= dup_threshold:
-            logger.info(
-                "Found duplicate recipe %s with similarity %.4f >= threshold %.2f",
-                recipe.id,
-                sim,
-                dup_threshold,
-            )
-            return (recipe, sim)
+    row = result.first()
+    if row is not None:
+        recipe, cosine_distance = row
+        similarity = 1.0 - float(cosine_distance)
+        logger.info(
+            "Found duplicate recipe %s with similarity %.4f >= threshold %.2f",
+            recipe.id,
+            similarity,
+            dup_threshold,
+        )
+        return (recipe, similarity)
 
     return None
 
