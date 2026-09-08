@@ -87,19 +87,36 @@ async def promote_candidate(
     candidate: RecipeCandidate,
     embedding: Optional[list[float]] = None,
     recipe_id: Optional[Union[uuid.UUID, str]] = None,
-) -> TaskRecipe:
+) -> Optional[TaskRecipe]:
     """
     Promote a validated recipe candidate into task_recipes with status 'trusted'.
     Source: BLUEPRINT.md §7, §11, §18.
     """
-    rec_uuid = uuid.UUID(str(recipe_id)) if recipe_id else uuid.uuid4()
-
     # Generate 384-d embedding from problem_pattern + recommended_strategy if not provided
     if embedding is None:
         text_to_embed = f"{candidate.problem_pattern} {candidate.recommended_strategy}"
         vector = generate_embedding(text_to_embed)
     else:
         vector = embedding
+
+    duplicate = await find_duplicate_recipe(
+        session,
+        user_id=candidate.user_id,
+        task_type=candidate.task_type,
+        candidate_embedding=vector,
+    )
+    if duplicate is not None:
+        duplicate_recipe, similarity = duplicate
+        logger.info(
+            "Skipped duplicate candidate %s (learning_decision=skip, "
+            "existing_recipe=%s, similarity=%.4f)",
+            candidate.id,
+            duplicate_recipe.id,
+            similarity,
+        )
+        return None
+
+    rec_uuid = uuid.UUID(str(recipe_id)) if recipe_id else uuid.uuid4()
 
     recipe = TaskRecipe(
         id=rec_uuid,
@@ -177,10 +194,16 @@ async def get_trusted_recipes_for_user(
 async def get_recipe_by_id(
     session: AsyncSession,
     recipe_id: Union[uuid.UUID, str],
+    *,
+    user_id: Union[uuid.UUID, str],
 ) -> Optional[TaskRecipe]:
-    """Retrieve trusted recipe by primary key."""
+    """Retrieve a recipe by primary key only for its authenticated owner."""
     rec_uuid = uuid.UUID(str(recipe_id))
+    user_uuid = uuid.UUID(str(user_id))
     result = await session.execute(
-        select(TaskRecipe).where(TaskRecipe.id == rec_uuid)
+        select(TaskRecipe).where(
+            TaskRecipe.id == rec_uuid,
+            TaskRecipe.user_id == user_uuid,
+        )
     )
     return result.scalar_one_or_none()

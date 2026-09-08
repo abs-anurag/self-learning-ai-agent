@@ -206,6 +206,10 @@ class Task(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'succeeded', 'failed')",
+            name="ck_tasks_status_valid",
+        ),
         Index("idx_tasks_user", "user_id", text("created_at DESC")),
     )
 
@@ -295,6 +299,10 @@ class TaskRun(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'succeeded', 'failed')",
+            name="ck_task_runs_status_valid",
+        ),
         Index("idx_task_runs_lookup", "task_id", text("created_at DESC")),
         Index("idx_task_runs_status", "status"),
     )

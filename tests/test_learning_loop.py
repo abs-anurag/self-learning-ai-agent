@@ -78,6 +78,9 @@ class MockResult:
     def scalar_one_or_none(self) -> Any:
         return self._scalar
 
+    def first(self) -> Any:
+        return None
+
     def scalars(self) -> "MockScalars":
         return MockScalars(self._scalars)
 
@@ -189,6 +192,19 @@ class MemoryTestSession:
             return MockResult(scalars_list=candidates)
 
         # Query experiences
+        if "from task_runs" in stmt_str and "join experiences" in stmt_str:
+            runs_by_id = self.task_runs
+            rows = []
+            for experience in self.experiences:
+                run = runs_by_id.get(experience.run_id)
+                if (
+                    run is not None
+                    and run.user_id == target_uid
+                    and run.status == TaskStatus.SUCCEEDED.value
+                ):
+                    rows.append((run.id, run.iteration_count, experience.task_type))
+            return MockResult(all_list=rows)
+
         if "from experiences" in stmt_str:
             exps = self.experiences
             if target_uid is not None:
@@ -216,6 +232,20 @@ class MemoryTestSession:
             runs_list = list(self.task_runs.values())
             if target_uid is not None:
                 runs_list = [r for r in runs_list if r.user_id == target_uid]
+
+            if "count(distinct" in stmt_str:
+                target_run_ids = next(
+                    (v for k, v in params.items() if k.startswith("id_")),
+                    [],
+                )
+                if not isinstance(target_run_ids, (list, tuple, set)):
+                    target_run_ids = [target_run_ids]
+                count = sum(
+                    1
+                    for run in runs_list
+                    if run.id in target_run_ids and run.status == TaskStatus.SUCCEEDED.value
+                )
+                return MockResult(scalar_val=count)
 
             if "avg(" in stmt_str:
                 iters = [r.iteration_count for r in runs_list if r.iteration_count > 0]
@@ -660,6 +690,88 @@ class TestGoldenLearningLoopScenario:
         assert delta == 0.50  # 50% reduction in iterations to solve!
 
 
+def add_retrieval_run(
+    session: MemoryTestSession,
+    *,
+    user_id: uuid.UUID,
+    status: str,
+    retrieval_events: int,
+    retrieved_hits: int = 1,
+) -> TaskRun:
+    task = Task(id=uuid.uuid4(), user_id=user_id, goal="Reuse recipe", status=status)
+    run = TaskRun(
+        id=uuid.uuid4(),
+        task_id=task.id,
+        user_id=user_id,
+        status=status,
+        iteration_count=1,
+    )
+    session.add(task)
+    session.add(run)
+    for sequence in range(1, retrieval_events + 1):
+        session.add(
+            AgentEvent(
+                event_id=uuid.uuid4(),
+                task_id=task.id,
+                run_id=run.id,
+                user_id=user_id,
+                sequence=sequence,
+                schema_version="1.0",
+                event_type=EventType.MEMORY_RETRIEVED.value,
+                status=TaskStatus.RUNNING.value,
+                metadata_={"hits": retrieved_hits},
+            )
+        )
+    return run
+
+
+def add_metric_run(
+    session: MemoryTestSession,
+    *,
+    user_id: uuid.UUID,
+    task_type: str,
+    iterations: int,
+    status: str = TaskStatus.SUCCEEDED.value,
+    retrieved_hits: int = 0,
+) -> TaskRun:
+    task = Task(id=uuid.uuid4(), user_id=user_id, goal=f"{task_type} task", status=status)
+    run = TaskRun(
+        id=uuid.uuid4(),
+        task_id=task.id,
+        user_id=user_id,
+        status=status,
+        iteration_count=iterations,
+    )
+    session.add(task)
+    session.add(run)
+    session.add(
+        Experience(
+            id=uuid.uuid4(),
+            task_id=task.id,
+            run_id=run.id,
+            user_id=user_id,
+            task_type=task_type,
+            tools_used=["calculator"],
+            outcome_summary="test outcome",
+        )
+    )
+    if retrieved_hits >= 1:
+        session.add(
+            AgentEvent(
+                event_id=uuid.uuid4(),
+                task_id=task.id,
+                run_id=run.id,
+                user_id=user_id,
+                sequence=1,
+                schema_version="1.0",
+                event_type=EventType.MEMORY_RETRIEVED.value,
+                status=TaskStatus.RUNNING.value,
+                metadata_={"hits": retrieved_hits},
+            )
+        )
+    return run
+
+
 class TestMetricsAggregation:
     """BLUEPRINT.md §15: GET /metrics calculation tests."""
 
@@ -711,6 +823,186 @@ class TestMetricsAggregation:
         assert metrics["success_rate"] == 1.0
         assert metrics["average_iterations"] == 1.0
         assert metrics["average_judge_score"] == 8.5
+
+    @pytest.mark.asyncio
+    async def test_successful_reuse_with_one_recipe_counts_one_run(self) -> None:
+        session = MemoryTestSession()
+        user_id = uuid.uuid4()
+        add_retrieval_run(
+            session,
+            user_id=user_id,
+            status=TaskStatus.SUCCEEDED.value,
+            retrieval_events=1,
+        )
+
+        metrics = await compute_user_metrics(session, user_id)
+
+        assert metrics["successful_reuses"] == 1
+
+    @pytest.mark.asyncio
+    async def test_successful_reuse_with_multiple_recipes_counts_one_run(self) -> None:
+        session = MemoryTestSession()
+        user_id = uuid.uuid4()
+        add_retrieval_run(
+            session,
+            user_id=user_id,
+            status=TaskStatus.SUCCEEDED.value,
+            retrieval_events=1,
+            retrieved_hits=2,
+        )
+
+        metrics = await compute_user_metrics(session, user_id)
+
+        assert metrics["successful_reuses"] == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_reuse_counts_zero_successful_reuses(self) -> None:
+        session = MemoryTestSession()
+        user_id = uuid.uuid4()
+        add_retrieval_run(
+            session,
+            user_id=user_id,
+            status=TaskStatus.FAILED.value,
+            retrieval_events=1,
+        )
+
+        metrics = await compute_user_metrics(session, user_id)
+
+        assert metrics["successful_reuses"] == 0
+
+    @pytest.mark.asyncio
+    async def test_successful_run_without_recipe_retrieval_counts_zero(self) -> None:
+        session = MemoryTestSession()
+        user_id = uuid.uuid4()
+        task = Task(id=uuid.uuid4(), user_id=user_id, goal="No reuse", status=TaskStatus.SUCCEEDED.value)
+        session.add(task)
+        session.add(
+            TaskRun(
+                id=uuid.uuid4(),
+                task_id=task.id,
+                user_id=user_id,
+                status=TaskStatus.SUCCEEDED.value,
+                iteration_count=1,
+            )
+        )
+
+        metrics = await compute_user_metrics(session, user_id)
+
+        assert metrics["successful_reuses"] == 0
+
+    @pytest.mark.asyncio
+    async def test_another_users_reuse_is_not_counted(self) -> None:
+        session = MemoryTestSession()
+        user_id = uuid.uuid4()
+        add_retrieval_run(
+            session,
+            user_id=uuid.uuid4(),
+            status=TaskStatus.SUCCEEDED.value,
+            retrieval_events=1,
+        )
+
+        metrics = await compute_user_metrics(session, user_id)
+
+        assert metrics["successful_reuses"] == 0
+
+    @pytest.mark.asyncio
+    async def test_improvement_rate_is_zero_without_an_eligible_baseline(self) -> None:
+        session = MemoryTestSession()
+        user_id = uuid.uuid4()
+        add_metric_run(session, user_id=user_id, task_type="math", iterations=1, retrieved_hits=1)
+
+        metrics = await compute_user_metrics(session, user_id)
+
+        assert metrics["improvement_rate"] == 0.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("reused_iterations", "expected"),
+        [(1, 1.0), (2, 0.0), (3, 0.0)],
+    )
+    async def test_improvement_rate_compares_reused_run_to_baseline(
+        self,
+        reused_iterations: int,
+        expected: float,
+    ) -> None:
+        session = MemoryTestSession()
+        user_id = uuid.uuid4()
+        add_metric_run(session, user_id=user_id, task_type="math", iterations=2)
+        add_metric_run(
+            session,
+            user_id=user_id,
+            task_type="math",
+            iterations=reused_iterations,
+            retrieved_hits=1,
+        )
+
+        metrics = await compute_user_metrics(session, user_id)
+
+        assert metrics["improvement_rate"] == expected
+
+    @pytest.mark.asyncio
+    async def test_improvement_rate_uses_independent_task_type_baselines(self) -> None:
+        session = MemoryTestSession()
+        user_id = uuid.uuid4()
+        add_metric_run(session, user_id=user_id, task_type="math", iterations=2)
+        add_metric_run(session, user_id=user_id, task_type="math", iterations=1, retrieved_hits=1)
+        add_metric_run(session, user_id=user_id, task_type="research", iterations=4)
+        add_metric_run(session, user_id=user_id, task_type="research", iterations=4, retrieved_hits=1)
+
+        metrics = await compute_user_metrics(session, user_id)
+
+        assert metrics["improvement_rate"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_improvement_rate_excludes_other_users(self) -> None:
+        session = MemoryTestSession()
+        user_id = uuid.uuid4()
+        add_metric_run(session, user_id=uuid.uuid4(), task_type="math", iterations=2)
+        add_metric_run(session, user_id=user_id, task_type="math", iterations=1, retrieved_hits=1)
+
+        metrics = await compute_user_metrics(session, user_id)
+
+        assert metrics["improvement_rate"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_successful_retrieved_run_is_not_a_baseline(self) -> None:
+        session = MemoryTestSession()
+        user_id = uuid.uuid4()
+        add_metric_run(session, user_id=user_id, task_type="math", iterations=1, retrieved_hits=1)
+        add_metric_run(session, user_id=user_id, task_type="math", iterations=2, retrieved_hits=1)
+
+        metrics = await compute_user_metrics(session, user_id)
+
+        assert metrics["improvement_rate"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_failed_run_is_not_a_baseline(self) -> None:
+        session = MemoryTestSession()
+        user_id = uuid.uuid4()
+        add_metric_run(
+            session,
+            user_id=user_id,
+            task_type="math",
+            iterations=1,
+            status=TaskStatus.FAILED.value,
+        )
+        add_metric_run(session, user_id=user_id, task_type="math", iterations=2, retrieved_hits=1)
+
+        metrics = await compute_user_metrics(session, user_id)
+
+        assert metrics["improvement_rate"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_improvement_rate_is_fractional_for_multiple_reused_runs(self) -> None:
+        session = MemoryTestSession()
+        user_id = uuid.uuid4()
+        add_metric_run(session, user_id=user_id, task_type="math", iterations=2)
+        add_metric_run(session, user_id=user_id, task_type="math", iterations=1, retrieved_hits=1)
+        add_metric_run(session, user_id=user_id, task_type="math", iterations=3, retrieved_hits=1)
+
+        metrics = await compute_user_metrics(session, user_id)
+
+        assert metrics["improvement_rate"] == 0.5
 
 
 class TestPromptFramingSecurity:

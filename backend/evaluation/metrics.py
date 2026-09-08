@@ -132,16 +132,13 @@ async def compute_user_metrics(
     # Number of task runs where at least one trusted recipe was retrieved and run became succeeded
     if retrieved_run_ids:
         succ_reuse_q = select(func.count(distinct(TaskRun.id))).where(
+            TaskRun.user_id == user_uuid,
             TaskRun.id.in_(list(retrieved_run_ids)),
             TaskRun.status == TaskStatus.SUCCEEDED.value,
         )
         successful_reuses = (await session.execute(succ_reuse_q)).scalar() or 0
     else:
-        # Fall back to sum of success_after_reuse from user's recipes
-        succ_after_reuse_q = select(func.sum(TaskRecipe.success_after_reuse)).where(
-            TaskRecipe.user_id == user_uuid
-        )
-        successful_reuses = (await session.execute(succ_after_reuse_q)).scalar() or 0
+        successful_reuses = 0
 
     # 10. average_judge_score across all evaluation rows
     avg_score_q = select(func.avg(Evaluation.judge_score)).where(
@@ -169,6 +166,7 @@ async def compute_user_metrics(
             TaskRun.user_id == user_uuid,
             TaskRun.status == TaskStatus.SUCCEEDED.value,
         )
+        .distinct()
     )
     runs_res = (await session.execute(runs_q)).all()
 
@@ -195,9 +193,6 @@ async def compute_user_metrics(
 
     if eligible_count > 0:
         improvement_rate = round(float(improved_count) / float(eligible_count), 2)
-    elif successful_reuses > 0 and recipes_promoted > 0:
-        # If runs data was not partitioned via events in test mocks, check ratio
-        improvement_rate = round(min(1.0, float(successful_reuses) / float(recipes_promoted)), 2)
 
     return {
         "total_tasks": int(total_tasks),
