@@ -44,7 +44,12 @@ async def plan(state: AgentState) -> dict[str, Any]:
             logger.warning("Failed to emit planning_started event: %s", exc)
 
     # Call LLM provider (FixtureProvider in demo, AnthropicProvider in live)
-    response = await provider.plan(state)
+    try:
+        response = await provider.plan(state)
+    except TimeoutError:
+        return {"termination_reason": "timeout", "error": "Language model request timed out.", "current_step": "plan"}
+    except Exception:
+        return {"termination_reason": "llm_failure", "error": "Language model provider returned an error.", "current_step": "plan"}
 
     plan_steps: list[str] = []
     if isinstance(response, dict) and "plan" in response:

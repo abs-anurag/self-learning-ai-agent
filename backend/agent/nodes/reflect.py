@@ -27,7 +27,12 @@ async def reflect(state: AgentState) -> dict[str, Any]:
     provider = runtime.llm_provider if runtime else get_llm_provider()
 
     # Call LLM provider reflection
-    response = await provider.reflect(state)
+    try:
+        response = await provider.reflect(state)
+    except TimeoutError:
+        return {"termination_reason": "timeout", "error": "Language model request timed out.", "current_step": "reflect"}
+    except Exception:
+        return {"termination_reason": "llm_failure", "error": "Language model provider returned an error.", "current_step": "reflect"}
 
     reflection_text: str = ""
     if isinstance(response, dict) and "reflection" in response:

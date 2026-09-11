@@ -56,9 +56,13 @@ async def retrieve_memory(state: AgentState) -> dict[str, Any]:
         else:
             retrieved = []
     else:
-        # Live mode: pgvector cosine similarity search on task_recipes
-        # Protected against missing DB session; zero hits is a valid outcome (§6 line 176)
-        retrieved = []
+        if runtime and runtime.persistence_enabled:
+            from backend.memory.retriever import RecipeRetriever
+            retrieved = await RecipeRetriever(runtime.session_factory).retrieve(
+                user_id=str(state["user_id"]),
+                task_type=str(state.get("task_type", "")),
+                query=str(state.get("understood_task") or state.get("goal", "")),
+            )
 
     # Emit telemetry event per BLUEPRINT.md §6 line 176, §14
     if runtime and runtime.event_service:

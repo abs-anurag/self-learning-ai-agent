@@ -1,12 +1,13 @@
 """
-Respond node: formats the final response, establishes terminal status, and emits task completion/failure events.
+Respond node: formats the final response, establishes terminal status,
+and emits task completion/failure events.
 
-Source of truth: BLUEPRINT.md §6 lines 179-182, §8 (Failure Model), §9, §14.
+Source of truth: BLUEPRINT.md §6, §8, §9, §14.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from backend.agent.state import AgentState
 from backend.core.logging import get_logger
@@ -14,7 +15,8 @@ from backend.events.schema import EventType
 
 logger = get_logger(__name__)
 
-# Standard user-visible messages from BLUEPRINT.md §8 Failure Model
+
+# Standard user-visible messages from BLUEPRINT.md §8 Failure Model.
 FAILURE_MESSAGES: dict[str, str] = {
     "max_iterations": "Task could not be solved within 3 iterations.",
     "timeout": "Request timed out while waiting for language model.",
@@ -29,14 +31,20 @@ FAILURE_MESSAGES: dict[str, str] = {
 
 async def respond(state: AgentState) -> dict[str, Any]:
     """
-    Constructs final user response and emits terminal task_completed or task_failed event.
-    Source: BLUEPRINT.md §8 line 337, §14.
+    Construct the final user response and emit a terminal
+    task_completed or task_failed event.
+
+    The existing termination_reason is preserved in the returned
+    state update so downstream consumers and tests can identify the
+    exact reason for terminal failure.
     """
     from backend.agent.runtime import get_current_runtime
 
     runtime = get_current_runtime()
+
     evaluation = state.get("evaluation", {})
     task_success = bool(evaluation.get("task_success", False))
+
     termination_reason = state.get("termination_reason")
     observations = state.get("observations", [])
     goal = state.get("goal", "")
@@ -44,21 +52,47 @@ async def respond(state: AgentState) -> dict[str, Any]:
     final_status: str
     final_response: str
 
+    # ------------------------------------------------------------------
+    # Successful task
+    # ------------------------------------------------------------------
+
     if task_success:
         final_status = "succeeded"
 
-        # Check for Golden Demo response formatting
-        if "10,000" in goal or "10000" in goal or state.get("run_id") == "run_a":
+        # Golden Demo: Run A.
+        if (
+            "10,000" in goal
+            or "10000" in goal
+            or state.get("run_id") == "run_a"
+        ):
             final_response = "The compound interest is $1,614.72."
-        elif "5,000" in goal or "5000" in goal or state.get("run_id") == "run_b":
-            final_response = "The compound interest on $5,000 at 7% annual rate for 5 years, compounded quarterly is $2,073.89 (total $7,073.89)."
+
+        # Golden Demo: Run B.
+        elif (
+            "5,000" in goal
+            or "5000" in goal
+            or state.get("run_id") == "run_b"
+        ):
+            final_response = (
+                "The compound interest on $5,000 at 7% annual rate for "
+                "5 years, compounded quarterly is $2,073.89 "
+                "(total $7,073.89)."
+            )
+
+        # Normal successful result.
         elif observations:
             latest_output = observations[-1].get("output", "")
-            final_response = f"The task was successfully solved. Result: {latest_output}"
+            final_response = (
+                f"The task was successfully solved. Result: {latest_output}"
+            )
+
         else:
             final_response = "Task executed successfully."
 
-        # Emit task_completed event (§14)
+        # --------------------------------------------------------------
+        # Emit task_completed event.
+        # --------------------------------------------------------------
+
         if runtime and runtime.event_service:
             try:
                 await runtime.emit_event(
@@ -73,17 +107,31 @@ async def respond(state: AgentState) -> dict[str, Any]:
                     },
                 )
             except Exception as exc:
-                logger.warning("Failed to emit task_completed event: %s", exc)
+                logger.warning(
+                    "Failed to emit task_completed event: %s",
+                    exc,
+                )
+
+    # ------------------------------------------------------------------
+    # Failed task
+    # ------------------------------------------------------------------
 
     else:
         final_status = "failed"
+
+        # Preserve the existing terminal reason. If none exists,
+        # max_iterations is the standard fallback failure reason.
         reason = termination_reason or "max_iterations"
+
         final_response = FAILURE_MESSAGES.get(
             reason,
             f"Task failed: {reason.replace('_', ' ')}.",
         )
 
-        # Emit task_failed event (§14)
+        # --------------------------------------------------------------
+        # Emit task_failed event.
+        # --------------------------------------------------------------
+
         if runtime and runtime.event_service:
             try:
                 await runtime.emit_event(
@@ -98,7 +146,13 @@ async def respond(state: AgentState) -> dict[str, Any]:
                     },
                 )
             except Exception as exc:
-                logger.warning("Failed to emit task_failed event: %s", exc)
+                logger.warning(
+                    "Failed to emit task_failed event: %s",
+                    exc,
+                )
+
+        # Use the resolved reason in the returned state.
+        termination_reason = reason
 
     logger.info(
         "Node 'respond' completed: status=%s, final_response=%s",
@@ -106,8 +160,18 @@ async def respond(state: AgentState) -> dict[str, Any]:
         final_response[:60],
     )
 
-    return {
+    # ------------------------------------------------------------------
+    # State update
+    # ------------------------------------------------------------------
+
+    update: dict[str, Any] = {
         "status": final_status,
         "final_response": final_response,
         "current_step": "respond",
     }
+
+    # Preserve terminal reason for failed responses.
+    if termination_reason:
+        update["termination_reason"] = termination_reason
+
+    return update

@@ -77,6 +77,16 @@ async def maybe_learn(state: AgentState) -> dict[str, Any]:
     # 2. Extract candidate recipe
     candidate = extract_candidate_recipe(state)
 
+    if runtime and runtime.persistence_enabled:
+        from backend.learning.candidate import save_candidate
+        from backend.learning.recipes import find_duplicate, save_trusted_recipe
+
+        async with runtime.session_factory() as session:
+            candidate_row = await save_candidate(session, state=state, candidate=candidate)
+            await session.flush()
+            candidate["candidate_id"] = str(candidate_row.id)
+            await session.commit()
+
     # Emit learning_candidate_created event (§11 line 501, §14)
     if runtime and runtime.event_service:
         try:
@@ -125,6 +135,16 @@ async def maybe_learn(state: AgentState) -> dict[str, Any]:
 
     learning_decision: str = "skip"
 
+    if runtime and runtime.persistence_enabled and all_criteria_passed:
+        from backend.learning.recipes import find_duplicate
+        async with runtime.session_factory() as session:
+            is_duplicate = await find_duplicate(
+                session,
+                user_id=str(state["user_id"]),
+                task_type=str(candidate["task_type"]),
+                text=f"{candidate['problem_pattern']} {candidate['recommended_strategy']}",
+                threshold=settings.RECIPE_DUPLICATE_THRESHOLD,
+            )
     if is_duplicate:
         # Duplicate suppresses creation (§10 line 465)
         learning_decision = "skip"
@@ -132,6 +152,12 @@ async def maybe_learn(state: AgentState) -> dict[str, Any]:
     elif all_criteria_passed:
         # Promotion passes all 7 criteria and is not duplicate
         learning_decision = "promoted"
+
+        if runtime and runtime.persistence_enabled:
+            from backend.learning.recipes import save_trusted_recipe
+            async with runtime.session_factory() as session:
+                await save_trusted_recipe(session, state=state, candidate=candidate)
+                await session.commit()
 
         # Emit learning_saved event (§11 line 502, §14)
         if runtime and runtime.event_service:
@@ -154,6 +180,16 @@ async def maybe_learn(state: AgentState) -> dict[str, Any]:
     else:
         # Criteria failed
         learning_decision = "candidate_only"
+        if runtime and runtime.persistence_enabled and candidate.get("candidate_id"):
+            from sqlalchemy import update
+            from backend.db.models import RecipeCandidate
+            async with runtime.session_factory() as session:
+                await session.execute(
+                    update(RecipeCandidate)
+                    .where(RecipeCandidate.id == uuid.UUID(candidate["candidate_id"]))
+                    .values(status="rejected")
+                )
+                await session.commit()
         logger.info("Quality gate failed for candidate (judge_score=%.1f); status=candidate_only", judge_score)
 
     return {

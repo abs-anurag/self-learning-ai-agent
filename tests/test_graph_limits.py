@@ -15,13 +15,15 @@ Verifies:
 5. Hard iteration limit (max_iterations = 3).
 6. LLM provider selection (demo -> FixtureProvider, live -> AnthropicProvider).
 7. AgentRuntime context, thread config (thread_id = run_id), and event emission.
-8. Checkpointer engine lifecycle (create and dispose).
+8. Checkpointer lifecycle (create and dispose).
 """
 
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List
+
 import pytest
 
 from backend.agent.providers import (
@@ -73,19 +75,27 @@ class MockDbSession:
 
     async def execute(self, stmt: Any) -> Any:
         stmt_str = str(stmt).lower()
+
         if "select" in stmt_str and "sequence_counter" in stmt_str:
+
             class ScalarResult:
                 def __init__(self, val: int) -> None:
                     self.val = val
+
                 def scalar_one_or_none(self) -> int:
                     return self.val
+
             return ScalarResult(self.counter)
+
         elif "update" in stmt_str and "sequence_counter" in stmt_str:
             self.counter += 1
+
             class EmptyResult:
                 def scalar_one_or_none(self) -> None:
                     return None
+
             return EmptyResult()
+
         return None
 
     def add(self, record: Any) -> None:
@@ -100,10 +110,15 @@ class MockDbSession:
     async def rollback(self) -> None:
         self.rolled_back = True
 
-    async def __aenter__(self) -> MockDbSession:
+    async def __aenter__(self) -> "MockDbSession":
         return self
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    async def __aexit__(
+        self,
+        exc_type: Any,
+        exc_val: Any,
+        exc_tb: Any,
+    ) -> None:
         if exc_type is not None:
             await self.rollback()
 
@@ -145,6 +160,7 @@ class TestAgentStateCreationAndDefaults:
             "max_iterations",
             "error",
         }
+
         assert set(state.keys()) == expected_fields
         assert len(state) == 21  # 21 fields defined in TypedDict
 
@@ -181,10 +197,13 @@ class TestAgentStateCreationAndDefaults:
     def test_invalid_identifiers_rejected(self) -> None:
         with pytest.raises(ValueError):
             create_initial_state("", "run-1", "user-1", "goal")
+
         with pytest.raises(ValueError):
             create_initial_state("task-1", "", "user-1", "goal")
+
         with pytest.raises(ValueError):
             create_initial_state("task-1", "run-1", "", "goal")
+
         with pytest.raises(ValueError):
             create_initial_state("task-1", "run-1", "user-1", "")
 
@@ -195,40 +214,64 @@ class TestAgentStateCreationAndDefaults:
 class TestStatusVocabularyAndValidation:
     """BLUEPRINT.md §1, §9, Appendix B: Strict status vocabulary."""
 
-    @pytest.mark.parametrize("valid_status", ["pending", "running", "succeeded", "failed"])
+    @pytest.mark.parametrize(
+        "valid_status",
+        ["pending", "running", "succeeded", "failed"],
+    )
     def test_valid_statuses_accepted(self, valid_status: str) -> None:
-        state = create_initial_state("t", "r", "u", "g", status=valid_status)
+        state = create_initial_state(
+            "t",
+            "r",
+            "u",
+            "g",
+            status=valid_status,
+        )
+
         assert state["status"] == valid_status
         validate_agent_state(state)
 
     def test_completed_is_strictly_forbidden(self) -> None:
         with pytest.raises(ValueError) as exc:
-            create_initial_state("t", "r", "u", "g", status="completed")
+            create_initial_state(
+                "t",
+                "r",
+                "u",
+                "g",
+                status="completed",
+            )
+
         assert "completed" in str(exc.value).lower()
 
         state = create_initial_state("t", "r", "u", "g")
         state["status"] = "completed"
+
         with pytest.raises(ValueError) as exc:
             validate_agent_state(state)
+
         assert "completed" in str(exc.value).lower()
 
     def test_invalid_task_type_rejected(self) -> None:
         state = create_initial_state("t", "r", "u", "g")
         state["task_type"] = "invalid_category"
+
         with pytest.raises(ValueError) as exc:
             validate_agent_state(state)
+
         assert "task_type" in str(exc.value)
 
     def test_invalid_learning_decision_rejected(self) -> None:
         state = create_initial_state("t", "r", "u", "g")
         state["learning_decision"] = "unsupported_decision"
+
         with pytest.raises(ValueError) as exc:
             validate_agent_state(state)
+
         assert "learning_decision" in str(exc.value)
 
     def test_invalid_iteration_count_rejected(self) -> None:
         state = create_initial_state("t", "r", "u", "g")
         state["iteration_count"] = -1
+
         with pytest.raises(ValueError):
             validate_agent_state(state)
 
@@ -248,6 +291,7 @@ class TestTelemetrySecurityAndSanitization:
             "api_key": "sk-ant-testkey12345",
             "current_step": "plan",
         }
+
         cleaned = sanitize_state_update(raw_update)
 
         assert "chain_of_thought" not in cleaned
@@ -261,13 +305,16 @@ class TestTelemetrySecurityAndSanitization:
         raw_update = {
             "error": "Failed with key sk-ant-secrettoken1234567890abcdef",
         }
+
         cleaned = sanitize_state_update(raw_update)
+
         assert "sk-ant-" not in cleaned["error"]
         assert "[REDACTED]" in cleaned["error"]
 
     def test_sanitize_state_update_rejects_completed_status(self) -> None:
         with pytest.raises(ValueError) as exc:
             sanitize_state_update({"status": "completed"})
+
         assert "completed" in str(exc.value).lower()
 
     def test_observation_truncation(self) -> None:
@@ -277,6 +324,7 @@ class TestTelemetrySecurityAndSanitization:
 
         long_text = "A" * 200
         truncated = truncate_observation(long_text, max_chars=100)
+
         assert len(truncated) <= 100
         assert "[TRUNCATED:" in truncated
 
@@ -291,9 +339,13 @@ class TestRoutingLogicAndGraphLimits:
         """When evaluation.task_success is True, routes immediately to maybe_learn."""
         state = create_initial_state("t", "r", "u", "g")
         state["iteration_count"] = 1
-        state["evaluation"] = {"task_success": True, "judge_score": 9.0}
+        state["evaluation"] = {
+            "task_success": True,
+            "judge_score": 9.0,
+        }
 
         destination = route_after_evaluate(state)
+
         assert destination == "maybe_learn"
 
     def test_iteration_limit_boundary_routes_to_respond(self) -> None:
@@ -301,21 +353,34 @@ class TestRoutingLogicAndGraphLimits:
         state = create_initial_state("t", "r", "u", "g")
         state["iteration_count"] = 3
         state["max_iterations"] = 3
-        state["evaluation"] = {"task_success": False, "judge_score": 4.0}
+        state["evaluation"] = {
+            "task_success": False,
+            "judge_score": 4.0,
+        }
 
         destination = route_after_evaluate(state)
+
         assert destination == "respond"
 
-    @pytest.mark.parametrize("terminal_reason", list(TERMINAL_REASONS - {"max_iterations"}))
-    def test_terminal_failure_routes_to_respond(self, terminal_reason: str) -> None:
+    @pytest.mark.parametrize(
+        "terminal_reason",
+        list(TERMINAL_REASONS - {"max_iterations"}),
+    )
+    def test_terminal_failure_routes_to_respond(
+        self,
+        terminal_reason: str,
+    ) -> None:
         """Fatal/terminal failure reasons terminate iteration loop and route to respond."""
         state = create_initial_state("t", "r", "u", "g")
         state["iteration_count"] = 1
         state["max_iterations"] = 3
-        state["evaluation"] = {"task_success": False}
+        state["evaluation"] = {
+            "task_success": False,
+        }
         state["termination_reason"] = terminal_reason
 
         destination = route_after_evaluate(state)
+
         assert destination == "respond"
 
     def test_retriable_failure_routes_to_reflect(self) -> None:
@@ -323,10 +388,14 @@ class TestRoutingLogicAndGraphLimits:
         state = create_initial_state("t", "r", "u", "g")
         state["iteration_count"] = 1
         state["max_iterations"] = 3
-        state["evaluation"] = {"task_success": False, "judge_score": 5.0}
+        state["evaluation"] = {
+            "task_success": False,
+            "judge_score": 5.0,
+        }
         state["termination_reason"] = None
 
         destination = route_after_evaluate(state)
+
         assert destination == "reflect"
 
     def test_second_iteration_retriable_routes_to_reflect(self) -> None:
@@ -334,9 +403,12 @@ class TestRoutingLogicAndGraphLimits:
         state = create_initial_state("t", "r", "u", "g")
         state["iteration_count"] = 2
         state["max_iterations"] = 3
-        state["evaluation"] = {"task_success": False}
+        state["evaluation"] = {
+            "task_success": False,
+        }
 
         destination = route_after_evaluate(state)
+
         assert destination == "reflect"
 
 
@@ -382,21 +454,31 @@ class TestAgentRuntime:
 
     def test_runtime_initialization_defaults(self) -> None:
         runtime = AgentRuntime()
+
         assert isinstance(runtime.llm_provider, LLMProvider)
         assert isinstance(runtime.event_service, EventService)
 
     def test_get_thread_config_matches_run_id(self) -> None:
         """BLUEPRINT.md §8: thread_id = run_id."""
         run_id = uuid.uuid4()
+
         config = AgentRuntime.get_thread_config(run_id)
-        assert config == {"configurable": {"thread_id": str(run_id)}}
+
+        assert config == {
+            "configurable": {
+                "thread_id": str(run_id),
+            }
+        }
 
     @pytest.mark.asyncio
     async def test_runtime_emit_event_delegates_to_event_service(self) -> None:
         """Telemetry emitted through runtime delegates directly to EventService."""
         redis_client = MockRedisClient()
         publisher = RedisEventPublisher(client=redis_client)
-        event_service = EventService(publisher=publisher)
+        event_service = EventService(
+            publisher=publisher,
+            session_factory=lambda: MockDbSession(),
+        )
         runtime = AgentRuntime(event_service=event_service)
 
         session = MockDbSession(initial_counter=0)
@@ -419,10 +501,62 @@ class TestAgentRuntime:
         assert redis_client.published[0][0] == f"agent.events.{run_id}"
 
     @pytest.mark.asyncio
-    async def test_checkpointer_context_engine_lifecycle(self) -> None:
-        """BLUEPRINT.md §8: Checkpointer engine created and safely disposed per invocation."""
+    async def test_checkpointer_context_lifecycle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """BLUEPRINT.md §8: verify checkpointer creation, setup, and cleanup."""
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        class FakeSaver:
+            def __init__(self) -> None:
+                self.setup_called = False
+
+            async def setup(self) -> None:
+                self.setup_called = True
+
+            def get_tuple(self) -> None:
+                return None
+
+        saver = FakeSaver()
+
+        lifecycle = {
+            "entered": False,
+            "exited": False,
+        }
+
+        captured: dict[str, str] = {}
+
+        @asynccontextmanager
+        async def fake_checkpointer_context():
+            lifecycle["entered"] = True
+            try:
+                yield saver
+            finally:
+                lifecycle["exited"] = True
+
+        def fake_from_conn_string(
+            connection_string: str,
+        ):
+            captured["connection_string"] = connection_string
+            return fake_checkpointer_context()
+
+        monkeypatch.setattr(
+            AsyncPostgresSaver,
+            "from_conn_string",
+            staticmethod(fake_from_conn_string),
+        )
+
         runtime = AgentRuntime()
-        async with runtime.checkpointer_context() as saver:
-            # saver is instantiated or None (if package not installed)
-            assert saver is None or hasattr(saver, "get_tuple")
-        # Exiting context manager disposes engine cleanly without errors
+
+        async with runtime.checkpointer_context(
+            url="postgresql+asyncpg://user:password@localhost/testdb"
+        ) as actual_saver:
+            assert actual_saver is saver
+
+        assert saver.setup_called is True
+        assert lifecycle["entered"] is True
+        assert lifecycle["exited"] is True
+        assert captured["connection_string"] == (
+            "postgresql://user:password@localhost/testdb"
+        )
