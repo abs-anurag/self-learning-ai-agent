@@ -1,7 +1,7 @@
 """
 Recipe retrieval node for LangGraph agent.
 
-Source of truth: BLUEPRINT.md ง8, ง10, ง11.
+Source of truth: BLUEPRINT.md ยง8, ยง10, ยง11.
 
 This node retrieves relevant prior recipes from the trusted recipe layer
 to inform agent strategy for the current task.
@@ -44,7 +44,7 @@ async def retrieve_node(state: AgentState, config: dict) -> dict:
     """
     LangGraph node: retrieve relevant prior recipes to inform agent strategy.
 
-    Source: BLUEPRINT.md ง8, ง10, ง11.
+    Source: BLUEPRINT.md ยง8, ยง10, ยง11.
 
     Args:
         state: Current AgentState with goal, understood_task, task_type, user_id.

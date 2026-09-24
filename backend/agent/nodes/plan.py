@@ -1,7 +1,7 @@
 """
 Planning node for LangGraph agent.
 
-Source of truth: BLUEPRINT.md ง8.
+Source of truth: BLUEPRINT.md ยง8.
 
 This node formulates the initial action plan, incorporating retrieved recipe context.
 Uses LLM provider's plan() method.

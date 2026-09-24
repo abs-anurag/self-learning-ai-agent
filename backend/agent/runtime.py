@@ -30,6 +30,7 @@ from backend.agent.providers import (
 from backend.agent.state import AgentState
 from backend.core.config import ExecutionMode, settings
 from backend.core.logging import get_logger
+from backend.db.models import TaskStatus
 from backend.db.session import (
     async_session_factory,
     create_engine_instance,
@@ -164,6 +165,225 @@ class AgentRuntime:
             yield saver
         finally:
             await dispose_engine(engine)
+
+    async def run(
+        self,
+        *,
+        run_id: Union[str, uuid.UUID],
+        task_id: Union[str, uuid.UUID],
+        user_id: Union[str, uuid.UUID],
+        goal: str,
+        task_type: str = "",
+        max_iterations: Optional[int] = None,
+        initial_state: Optional[dict[str, Any]] = None,
+        url: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Execute the agent graph for a single task run.
+
+        Source: BLUEPRINT.md §8, §15.
+
+        Lifecycle:
+        1. Create per-invocation async engine and AsyncPostgresSaver.
+        2. Call saver.setup() if available.
+        3. Compile the LangGraph with the checkpointer.
+        4. Create initial AgentState.
+        5. Invoke the graph with thread_id = run_id.
+        6. Process final state.
+        7. Update authoritative task/run status in PostgreSQL.
+        8. Dispose engine and checkpointer resources.
+
+        Args:
+            run_id: Task run identifier (UUID string or UUID object).
+            task_id: Task identifier (UUID string or UUID object).
+            user_id: User identifier (UUID string or UUID object).
+            goal: Task goal string.
+            task_type: Optional task type ("math", "research", "file", "code", "mixed").
+            max_iterations: Optional iteration limit (default: settings.MAX_ITERATIONS).
+            initial_state: Optional pre-built state dict to merge with defaults.
+            url: Optional PostgreSQL URL override.
+
+        Returns:
+            dict: Final AgentState after graph execution completes.
+
+        Raises:
+            RuntimeError: If langgraph is not installed.
+        """
+        # Defensive import: langgraph must be installed for real execution.
+        try:
+            from langgraph.graph import END, START, StateGraph  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "langgraph is required for AgentRuntime.run(). "
+                "Install langgraph>=0.2.0,<0.3.0."
+            ) from exc
+
+        from backend.agent.graph import build_agent_graph
+        from backend.agent.state import create_initial_state
+
+        run_id_str = str(run_id)
+        task_id_str = str(task_id)
+        user_id_str = str(user_id)
+
+        logger.info(
+            f"[AgentRuntime.run] Starting execution for task {task_id_str}, "
+            f"run {run_id_str}, user {user_id_str}"
+        )
+
+        # Build initial state
+        if initial_state is not None:
+            state = create_initial_state(
+                task_id=task_id_str,
+                run_id=run_id_str,
+                user_id=user_id_str,
+                goal=goal,
+                max_iterations=max_iterations,
+            )
+            state.update(initial_state)
+        else:
+            state = create_initial_state(
+                task_id=task_id_str,
+                run_id=run_id_str,
+                user_id=user_id_str,
+                goal=goal,
+                max_iterations=max_iterations,
+            )
+            if task_type:
+                state["task_type"] = task_type
+
+        # -- Per-invocation checkpointer lifecycle (BLUEPRINT.md §8) --
+        async with self.checkpointer_context(url=url) as saver:
+            # Compile graph with checkpointer
+            graph = build_agent_graph(checkpointer=saver)
+
+            # Build config with thread_id = run_id
+            config = self.get_thread_config(run_id_str)
+            # Pass runtime, settings into node config
+            config["runtime"] = self
+            config["settings"] = settings
+
+            # Provide a db_session for nodes that need it (evaluate, learn, etc.)
+            # The session is created from a separate per-invocation engine
+            # (node_engine) distinct from the checkpointer engine.
+            from sqlalchemy.ext.asyncio import async_sessionmaker
+            from backend.db.session import create_engine_instance
+
+            node_engine = create_engine_instance(url)
+            node_session_factory = async_sessionmaker(
+                bind=node_engine,
+                class_=AsyncSession,
+                expire_on_commit=False,
+                autoflush=False,
+            )
+
+            try:
+                async with node_session_factory() as db_session:
+                    config["db_session"] = db_session
+
+                    # Execute the graph
+                    try:
+                        final_state = await graph.ainvoke(state, config=config)
+                    except Exception as exc:
+                        logger.error(
+                            f"[AgentRuntime.run] Graph execution failed for run {run_id_str}: {exc}",
+                            exc_info=True,
+                        )
+                        # Update authoritative run status to failed
+                        try:
+                            await self._update_run_status(
+                                run_id_str,
+                                "failed",
+                                termination_reason="graph_execution_error",
+                            )
+                        except Exception:
+                            logger.warning(
+                                f"[AgentRuntime.run] Failed to update run status after graph error for {run_id_str}"
+                            )
+                        raise
+
+                    # Process final state and update authoritative status
+                    final_status = final_state.get("status", "failed")
+                    termination_reason = final_state.get("termination_reason") or "unknown"
+
+                    logger.info(
+                        f"[AgentRuntime.run] Graph execution complete for run {run_id_str}: "
+                        f"status={final_status}, termination_reason={termination_reason}"
+                    )
+
+                    # Update authoritative task/run status in PostgreSQL
+                    try:
+                        await self._update_run_status(
+                            run_id_str,
+                            final_status,
+                            termination_reason=termination_reason,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            f"[AgentRuntime.run] Failed to update run status for {run_id_str}: {exc}",
+                            exc_info=True,
+                        )
+
+                    return final_state
+            finally:
+                await dispose_engine(node_engine)
+
+    async def _update_run_status(
+        self,
+        run_id: str,
+        status: Union[TaskStatus, str],
+        *,
+        termination_reason: Optional[str] = None,
+        final_response: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """
+        Update the authoritative task_runs status in PostgreSQL.
+
+        Source: BLUEPRINT.md §1, §9: AgentState.status is execution-local;
+        the authoritative status for execution is task_runs.status in PostgreSQL.
+        """
+        from sqlalchemy import select, update
+        from backend.db.models import Task, TaskRun
+
+        run_uuid = uuid.UUID(run_id)
+        if isinstance(status, TaskStatus):
+            status_value = status.value
+        else:
+            status_value = str(status)
+
+        async with self.session_factory() as session:
+            try:
+                # Update the run status
+                run_stmt = (
+                    update(TaskRun)
+                    .where(TaskRun.id == run_uuid)
+                    .values(
+                        status=status_value,
+                        termination_reason=termination_reason,
+                    )
+                )
+                await session.execute(run_stmt)
+
+                # Find and update the parent task status
+                task_id_result = await session.execute(
+                    select(TaskRun.task_id).where(TaskRun.id == run_uuid)
+                )
+                task_id_row = task_id_result.scalar_one_or_none()
+                if task_id_row is not None:
+                    task_stmt = (
+                        update(Task)
+                        .where(Task.id == task_id_row)
+                        .values(status=status_value)
+                    )
+                    await session.execute(task_stmt)
+
+                await session.commit()
+                logger.debug(
+                    f"[_update_run_status] Updated run {run_id} to status={status_value}"
+                )
+            except Exception:
+                await session.rollback()
+                raise
 
     async def close(self) -> None:
         """Close any open publisher or runtime resources."""
