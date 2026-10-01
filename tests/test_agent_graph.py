@@ -23,9 +23,9 @@ def test_agent_graph_stub_structure():
     assert hasattr(graph, 'edges')
     assert hasattr(graph, 'conditional_edges')
 
-    # Check nodes
+# Check nodes
     expected_nodes = {
-        "understand", "retrieve_memory", "plan", "execute",
+        "understand", "retrieve_memory", "planning", "execute",
         "observe", "evaluate", "reflect", "replan", "maybe_learn", "respond"
     }
     assert set(graph.nodes.keys()) == expected_nodes
@@ -34,8 +34,8 @@ def test_agent_graph_stub_structure():
     edges = set(graph.edges)
     assert (None, "understand") in edges  # START -> understand
     assert ("understand", "retrieve_memory") in edges
-    assert ("retrieve_memory", "plan") in edges
-    assert ("plan", "execute") in edges
+    assert ("retrieve_memory", "planning") in edges
+    assert ("planning", "execute") in edges
     assert ("execute", "observe") in edges
     assert ("observe", "evaluate") in edges
 

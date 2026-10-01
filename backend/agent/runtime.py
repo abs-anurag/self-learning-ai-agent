@@ -139,32 +139,27 @@ class AgentRuntime:
         Async context manager managing the checkpointer lifecycle per BLUEPRINT.md §8:
 
         Inside each Celery task invocation:
-        1. Create a fresh async engine.
-        2. Instantiate checkpointer: saver = AsyncPostgresSaver(engine).
-        3. Call await saver.setup() if required.
-        4. Yield saver for execution.
-        5. Close and dispose the engine before exiting.
+        1. Create AsyncPostgresSaver from connection string using from_conn_string.
+        2. Call await saver.setup() to ensure tables exist.
+        3. Yield saver for execution.
+        4. Connection is closed automatically when context exits.
         """
-        engine: AsyncEngine = create_engine_instance(url)
-        saver: Any = None
+        target_url = url or settings.POSTGRES_URL.get_secret_value()
         try:
-            try:
-                from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-                saver = AsyncPostgresSaver(engine)
+            # Use the classmethod from_conn_string which manages the connection lifecycle
+            async with AsyncPostgresSaver.from_conn_string(target_url) as saver:
                 # Idempotent setup if available
                 if hasattr(saver, "setup"):
                     await saver.setup()
-            except ImportError:
-                logger.warning(
-                    "langgraph-checkpoint-postgres not installed; "
-                    "yielding None checkpointer for lightweight execution."
-                )
-                saver = None
-
-            yield saver
-        finally:
-            await dispose_engine(engine)
+                yield saver
+        except ImportError:
+            logger.warning(
+                "langgraph-checkpoint-postgres not installed; "
+                "yielding None checkpointer for lightweight execution."
+            )
+            yield None
 
     async def run(
         self,
@@ -184,14 +179,14 @@ class AgentRuntime:
         Source: BLUEPRINT.md §8, §15.
 
         Lifecycle:
-        1. Create per-invocation async engine and AsyncPostgresSaver.
+        1. Create AsyncPostgresSaver via from_conn_string (per-invocation, manages its own connection).
         2. Call saver.setup() if available.
         3. Compile the LangGraph with the checkpointer.
         4. Create initial AgentState.
         5. Invoke the graph with thread_id = run_id.
         6. Process final state.
         7. Update authoritative task/run status in PostgreSQL.
-        8. Dispose engine and checkpointer resources.
+        8. Checkpointer connection closed automatically when context exits; node engine disposed separately.
 
         Args:
             run_id: Task run identifier (UUID string or UUID object).

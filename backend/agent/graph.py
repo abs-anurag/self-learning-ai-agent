@@ -130,7 +130,7 @@ def build_agent_graph(checkpointer: Optional[Any] = None) -> Any:
     # -- Register nodes (BLUEPRINT.md §8 Node Table) --------------
     graph.add_node("understand", understand_node)
     graph.add_node("retrieve_memory", retrieve_node)
-    graph.add_node("plan", plan_node)
+    graph.add_node("planning", plan_node)
     graph.add_node("execute", execute_node)
     graph.add_node("observe", observe_node)
     graph.add_node("evaluate", evaluate_node)
@@ -142,8 +142,8 @@ def build_agent_graph(checkpointer: Optional[Any] = None) -> Any:
     # -- Wire edges (BLUEPRINT.md §8 Graph Topology) --------------
     graph.add_edge(START, "understand")
     graph.add_edge("understand", "retrieve_memory")
-    graph.add_edge("retrieve_memory", "plan")
-    graph.add_edge("plan", "execute")
+    graph.add_edge("retrieve_memory", "planning")
+    graph.add_edge("planning", "execute")
     graph.add_edge("execute", "observe")
     graph.add_edge("observe", "evaluate")
 

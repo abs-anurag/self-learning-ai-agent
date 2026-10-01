@@ -38,6 +38,7 @@ import hashlib
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import Depends, FastAPI, Request
@@ -740,8 +741,12 @@ class TestPhase2Routes:
         # Reset task creation rate limiter between test cases
         task_rate_limiter._history.clear()
 
-        client = TestClient(app, raise_server_exceptions=False)
-        yield client, key_a, user_a, key_b, user_b, db
+        # Mock Celery task dispatch to avoid Redis connection in tests
+        with patch("backend.worker.tasks.run_agent_task.delay") as mock_delay:
+            mock_delay.return_value = None
+            client = TestClient(app, raise_server_exceptions=False)
+            yield client, key_a, user_a, key_b, user_b, db
+
         app.dependency_overrides.clear()
 
     # 1. POST /tasks
