@@ -32,3 +32,4 @@ frontend/.vite
 .coverage
 htmlcov/
 pytestcache/
+.kilo/
