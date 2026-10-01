@@ -14,8 +14,8 @@ from backend.core.config import settings
 
 app = Celery(
     "self_learning_ai_agent",
-    broker=settings.CELERY_BROKER_URL,
-    backend=settings.CELERY_RESULT_BACKEND,
+    broker=settings.REDIS_URL,
+    backend=settings.REDIS_URL,
 )
 
 app.conf.update(

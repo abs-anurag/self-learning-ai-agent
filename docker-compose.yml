@@ -1,0 +1,106 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: self_learning_postgres
+    environment:
+      - POSTGRES_DB=agent_db
+      - POSTGRES_USER=app_user
+      - POSTGRES_PASSWORD=app_password
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U app_user -d agent_db" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: self_learning_redis
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app_network
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: self_learning_backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - EXECUTION_MODE=demo
+      - LLM_PROVIDER=fixture
+      - POSTGRES_URL=postgresql+asyncpg://app_user:app_password@postgres:5432/agent_db
+      - REDIS_URL=redis://redis:6379/0
+      - ANTHROPIC_API_KEY=sk-ant-placeholder-key-do-not-commit
+      - TAVILY_API_KEY=tvly-placeholder-key-do-not-commit
+      - API_KEY_SALT=change_this_to_a_secure_random_salt_min_32_chars
+    ports:
+      - "8000:8000"
+    networks:
+      - app_network
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5).read()" ]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: self_learning_worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - EXECUTION_MODE=demo
+      - LLM_PROVIDER=fixture
+      - POSTGRES_URL=postgresql+asyncpg://app_user:app_password@postgres:5432/agent_db
+      - REDIS_URL=redis://redis:6379/0
+      - ANTHROPIC_API_KEY=sk-ant-placeholder-key-do-not-commit
+      - TAVILY_API_KEY=tvly-placeholder-key-do-not-commit
+      - API_KEY_SALT=change_this_to_a_secure_random_salt_min_32_chars
+    command: [
+      "celery",
+      "-A",
+      "backend.worker.celery_app:app",
+      "worker",
+      "--loglevel=info",
+      "--concurrency=2",
+    ]
+    networks:
+      - app_network
+    healthcheck:
+      test: [ "CMD", "celery", "-A", "backend.worker.celery_app:app", "inspect", "ping" ]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  pg_data:
+  redis_data:
+
+networks:
+  app_network:
+    driver: bridge
