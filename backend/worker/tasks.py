@@ -78,7 +78,9 @@ def run_agent_task(
                     "task_id": str(run_record.task_id),
                     "user_id": str(run_record.user_id),
                     "goal": task_record.goal if task_record else "",
-                    "task_type": task_record.task_type if task_record else "",
+                    # task_type is determined by the understand node during execution;
+                    # Task model does not have task_type column (stored in Experience/Recipe)
+                    "task_type": "",
                 }
 
         try:
@@ -86,7 +88,7 @@ def run_agent_task(
         except Exception as exc:
             logger.error(f"[run_agent_task] Failed to lookup task metadata: {exc}", exc_info=True)
             # Mark run as failed
-            asyncio.run(_mark_run_failed(run_uuid, "metadata_lookup_error", str(exc)))
+            asyncio.run(_mark_run_failed(run_uuid, "metadata_lookup_error"))
             return {"status": "failed", "error": str(exc)}
 
         task_id = task_id or metadata["task_id"]
@@ -132,7 +134,7 @@ def run_agent_task(
     except Exception as exc:
         logger.error(f"[run_agent_task] Agent execution failed for run {run_id}: {exc}", exc_info=True)
         try:
-            asyncio.run(_mark_run_failed(run_uuid, "agent_execution_error", str(exc)))
+            asyncio.run(_mark_run_failed(run_uuid, "agent_execution_error"))
         except Exception:
             logger.warning(f"[run_agent_task] Failed to mark run as failed after error for {run_id}")
         return {"status": "failed", "error": str(exc)}
