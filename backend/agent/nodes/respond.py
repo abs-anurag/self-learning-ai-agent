@@ -1,4 +1,4 @@
-﻿"""
+"""
 Response node for LangGraph agent.
 
 Source of truth: BLUEPRINT.md §8.
@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from backend.agent.runtime import AgentRuntime
+from backend.agent.runtime import AgentRuntime, get_runtime, get_db_session
 from backend.agent.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -32,22 +32,23 @@ async def respond_node(state: AgentState, config: dict) -> dict[str, Any]:
     Args:
         state: Current AgentState with evaluation, observations, final_response.
         config: Configuration dict containing:
-            - runtime: AgentRuntime for event emission
-            - db_session: AsyncSession for database operations (optional)
+            - runtime: AgentRuntime for event emission (also in metadata.runtime)
 
     Returns:
         dict: State update with final_response, status, termination_reason.
 
     Notes:
-        - Sets status to 'succeeded' if task_success, else 'failed'
+        - Sets status to "succeeded" if task_success, else "failed"
         - Sets termination_reason appropriately
         - Emits task_completed or task_failed event
         - Formats final response for user
     """
-    logger.info(f"[respond_node] Starting response for task {state['task_id']}, run {state['run_id']}")
+    task_id = state.get("task_id", "")
+    run_id = state.get("run_id", "")
+    logger.info(f"[respond_node] Starting response for task {task_id}, run {run_id}")
 
-    runtime: AgentRuntime | None = config.get("runtime")
-    db_session = config.get("db_session")
+    runtime: AgentRuntime | None = get_runtime(config)
+    db_session = get_db_session(config)
 
     evaluation = state.get("evaluation", {})
     task_success = evaluation.get("task_success", False)
@@ -85,6 +86,7 @@ async def respond_node(state: AgentState, config: dict) -> dict[str, Any]:
                     "task_success": task_success,
                     "termination_reason": termination_reason,
                     "iteration_count": state.get("iteration_count", 0),
+                    "final_response": final_response,
                     "final_response_length": len(final_response),
                 },
                 session=db_session,

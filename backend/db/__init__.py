@@ -22,8 +22,6 @@ from backend.db.models import (
     User,
 )
 from backend.db.session import (
-    async_engine,
-    async_session_factory,
     create_engine_instance,
     dispose_engine,
     get_db_session,
@@ -46,8 +44,6 @@ __all__ = [
     "CandidateStatus",
     "RecipeStatus",
     "TaskType",
-    "async_engine",
-    "async_session_factory",
     "create_engine_instance",
     "dispose_engine",
     "get_db_session",

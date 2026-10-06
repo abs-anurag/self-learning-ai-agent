@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from backend.agent.runtime import AgentRuntime
+from backend.agent.runtime import AgentRuntime, get_runtime
 from backend.agent.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -56,9 +56,9 @@ def build_plan_context(state: AgentState) -> str:
 
 async def plan_node(state: AgentState, config: dict) -> dict[str, Any]:
     logger.info(f"[plan_node] Starting planning for task {state['task_id']}, run {state['run_id']}")
-    runtime: AgentRuntime | None = config.get("runtime")
+    runtime: AgentRuntime | None = get_runtime(config)
     if not runtime:
-        logger.error("[plan_node] No runtime in config")
+        logger.error("[plan_node] No runtime in context")
         return _fallback_plan()
     try:
         context = build_plan_context(state)

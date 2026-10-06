@@ -10,10 +10,14 @@ Design rules:
 - Supports the per-invocation engine lifecycle required for Celery workers (§8):
   engines can be dynamically instantiated and disposed per task execution.
 - Provides FastAPI dependency `get_db_session()` with safe commit/rollback semantics.
+- Global engine/session_factory are LAZY - created on first access to avoid
+  creating asyncpg pools at import time (which would be forked to Celery workers).
 """
 
 from __future__ import annotations
 
+import asyncio
+import socket
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -29,6 +33,34 @@ from backend.core.config import settings
 from backend.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+# --- Module-level singletons (lazy initialization) ---
+_async_engine: Optional[AsyncEngine] = None
+_async_session_factory: Optional[async_sessionmaker[AsyncSession]] = None
+
+
+def _get_async_engine() -> AsyncEngine:
+    """Get or create the global async engine (lazy initialization)."""
+    global _async_engine
+    if _async_engine is None:
+        _async_engine = create_engine_instance()
+        logger.debug("Created global async engine (lazy initialization)")
+    return _async_engine
+
+
+def _get_async_session_factory() -> async_sessionmaker[AsyncSession]:
+    """Get or create the global async session factory (lazy initialization)."""
+    global _async_session_factory
+    if _async_session_factory is None:
+        _async_session_factory = async_sessionmaker(
+            bind=_get_async_engine(),
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autoflush=False,
+        )
+        logger.debug("Created global async session factory (lazy initialization)")
+    return _async_session_factory
 
 
 def create_engine_instance(
@@ -61,20 +93,37 @@ async def dispose_engine(engine: AsyncEngine) -> None:
     """
     Safely close and dispose an AsyncEngine instance.
     Source: BLUEPRINT.md §8 Checkpointer Lifecycle.
+
+    AsyncPG pool shutdown can block when PostgreSQL is unavailable or the
+    connection pool is already stale. In those cases we fail closed by skipping
+    disposal rather than blocking the worker lifecycle indefinitely.
     """
-    if engine is not None:
-        await engine.dispose()
+    if engine is None:
+        return
 
+    try:
+        host = engine.url.host
+        port = engine.url.port or 5432
+        if host is not None:
+            with socket.create_connection((host, port), timeout=0.25):
+                pass
+    except OSError:
+        logger.warning(
+            "Skipping async engine disposal because Postgres endpoint %s:%s is unavailable.",
+            engine.url.host,
+            engine.url.port or 5432,
+        )
+        return
+    except Exception:
+        logger.exception("Unexpected error checking database endpoint for engine disposal.")
+        return
 
-# Global async engine and session factory for FastAPI / web application lifecycle
-async_engine: AsyncEngine = create_engine_instance()
-
-async_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
-    bind=async_engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-    autoflush=False,
-)
+    try:
+        await asyncio.wait_for(engine.dispose(), timeout=2.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        logger.warning("Timed out while disposing async database engine; continuing without blocking the worker.")
+    except Exception:
+        logger.exception("Unexpected error while disposing async database engine.")
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
@@ -82,7 +131,8 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     FastAPI dependency yielding an AsyncSession with automated transaction management.
     Commits on successful completion, rolls back on exception.
     """
-    async with async_session_factory() as session:
+    session_factory = _get_async_session_factory()
+    async with session_factory() as session:
         try:
             yield session
             await session.commit()
@@ -98,7 +148,7 @@ async def session_scope(
     """
     Async context manager for standalone / worker session management.
     """
-    factory = session_factory or async_session_factory
+    factory = session_factory or _get_async_session_factory()
     async with factory() as session:
         try:
             yield session
@@ -106,3 +156,25 @@ async def session_scope(
         except Exception:
             await session.rollback()
             raise
+
+
+# --- Backwards-compatible property access (for existing imports) ---
+# These allow `from backend.db.session import async_engine, async_session_factory`
+# to work, but they trigger lazy initialization on first access.
+
+def __getattr__(name: str):
+    if name == "async_engine":
+        return _get_async_engine()
+    if name == "async_session_factory":
+        return _get_async_session_factory()
+    raise AttributeError(f"module 'backend.db.session' has no attribute '{name}'")
+
+
+__all__ = [
+    "create_engine_instance",
+    "dispose_engine",
+    "get_db_session",
+    "session_scope",
+    "async_engine",
+    "async_session_factory",
+]

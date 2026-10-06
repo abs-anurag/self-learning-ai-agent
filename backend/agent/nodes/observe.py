@@ -1,4 +1,4 @@
-﻿"""
+"""
 Observation node for LangGraph agent.
 
 Source of truth: BLUEPRINT.md §8.
@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from backend.agent.runtime import AgentRuntime
 from backend.agent.state import AgentState, truncate_observation
 
 logger = logging.getLogger(__name__)

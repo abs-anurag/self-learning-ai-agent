@@ -43,10 +43,12 @@ from backend.db import (
     TaskStatus,
     TaskType,
     User,
-    async_engine,
-    async_session_factory,
     create_engine_instance,
     dispose_engine,
+)
+from backend.db.session import (
+    async_engine,
+    async_session_factory,
 )
 
 

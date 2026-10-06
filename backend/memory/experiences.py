@@ -32,23 +32,59 @@ from backend.db.models import Experience, TaskRun, Task
 # Patterns for detecting sensitive information
 SENSITIVE_PATTERNS = [
     # API Keys and tokens
-    (re.compile(r'(api[_-]?key|apikey|access[_-]?key|secret[_-]?key)[\s:=]+[\"']?([a-zA-Z0-9_\-]{20,})[\"']?', re.IGNORECASE), '[API_KEY_REDACTED]'),
-    (re.compile(r'(bearer|token)[\s:=]+[\"']?([a-zA-Z0-9_\-\.]{20,})[\"']?', re.IGNORECASE), '[TOKEN_REDACTED]'),
+    (
+        re.compile(
+            r"(api[_-]?key|apikey|access[_-]?key|secret[_-]?key)[\s:=]+([a-zA-Z0-9_\-]{20,})",
+            re.IGNORECASE,
+        ),
+        "[API_KEY_REDACTED]",
+    ),
+    (
+        re.compile(
+            r"(bearer|token)[\s:=]+([a-zA-Z0-9_\-\.]{20,})",
+            re.IGNORECASE,
+        ),
+        "[TOKEN_REDACTED]",
+    ),
 
     # Passwords
-    (re.compile(r'(password|passwd|pwd)[\s:=]+[\"']?([^\s\"']{6,})[\"']?', re.IGNORECASE), '[PASSWORD_REDACTED]'),
+    (
+        re.compile(
+            r"(password|passwd|pwd)[\s:=]+([^\s\"']{6,})",
+            re.IGNORECASE,
+        ),
+        "[PASSWORD_REDACTED]",
+    ),
 
     # AWS keys
-    (re.compile(r'(AKIA[0-9A-Z]{16})', re.IGNORECASE), '[AWS_KEY_REDACTED]'),
+    (re.compile(r"(AKIA[0-9A-Z]{16})", re.IGNORECASE), "[AWS_KEY_REDACTED]"),
 
     # Private keys
-    (re.compile(r'-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]+?-----END [A-Z ]+ PRIVATE KEY-----', re.IGNORECASE), '[PRIVATE_KEY_REDACTED]'),
+    (
+        re.compile(
+            r"-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]+?-----END [A-Z ]+ PRIVATE KEY-----",
+            re.IGNORECASE,
+        ),
+        "[PRIVATE_KEY_REDACTED]",
+    ),
 
     # OAuth tokens
-    (re.compile(r'(oauth[_-]?token|access[_-]?token)[\s:=]+[\"']?([a-zA-Z0-9_\-\.]{20,})[\"']?', re.IGNORECASE), '[OAUTH_TOKEN_REDACTED]'),
+    (
+        re.compile(
+            r"(oauth[_-]?token|access[_-]?token)[\s:=]+([a-zA-Z0-9_\-\.]{20,})",
+            re.IGNORECASE,
+        ),
+        "[OAUTH_TOKEN_REDACTED]",
+    ),
 
     # Connection strings with passwords
-    (re.compile(r'(mongodb(\+srv)?|postgres|mysql|redis)://[^:]+:([^@]+)@', re.IGNORECASE), r'\1://[USER]:[PASSWORD_REDACTED]@'),
+    (
+        re.compile(
+            r"(mongodb(\+srv)?|postgres|mysql|redis)://[^:]+:([^@]+)@",
+            re.IGNORECASE,
+        ),
+        r"\1://[USER]:[PASSWORD_REDACTED]@",
+    ),
 ]
 
 # Keys that should be removed entirely from dictionaries

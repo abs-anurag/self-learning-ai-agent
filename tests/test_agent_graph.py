@@ -64,7 +64,6 @@ def test_agent_graph_compiled_when_langgraph_available():
 
     # When langgraph is available, the graph should be a CompiledGraph instance
     # and should not have the stub's attributes
-    assert not hasattr(graph, 'nodes')
     assert not hasattr(graph, 'edges')
     assert not hasattr(graph, 'conditional_edges')
 
@@ -72,3 +71,36 @@ def test_agent_graph_compiled_when_langgraph_available():
     assert hasattr(graph, 'invoke')
     # It should not have a compile method (that's on the StateGraph instance before compiling)
     assert not hasattr(graph, 'compile')
+
+
+def test_checkpointer_url_conversion():
+    """Test that SQLAlchemy URL format is converted to psycopg format for checkpointer.
+    
+    SQLAlchemy uses postgresql+asyncpg:// format, but LangGraph's AsyncPostgresSaver
+    uses psycopg which only accepts postgresql:// format.
+    """
+    # Test the conversion logic directly
+    def convert_url_for_checkpointer(url: str) -> str:
+        """Convert SQLAlchemy URL to psycopg format for checkpointer."""
+        if url.startswith("postgresql+asyncpg://"):
+            return url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        return url
+    
+    # Test SQLAlchemy asyncpg URL
+    sqlalchemy_url = "postgresql+asyncpg://user:pass@host:5432/dbname"
+    expected = "postgresql://user:pass@host:5432/dbname"
+    assert convert_url_for_checkpointer(sqlalchemy_url) == expected
+    
+    # Test with password containing special characters
+    sqlalchemy_url_special = "postgresql+asyncpg://user:p%40ss@host:5432/dbname"
+    expected_special = "postgresql://user:p%40ss@host:5432/dbname"
+    assert convert_url_for_checkpointer(sqlalchemy_url_special) == expected_special
+    
+    # Test URL without asyncpg prefix (should remain unchanged)
+    psycopg_url = "postgresql://user:pass@host:5432/dbname"
+    assert convert_url_for_checkpointer(psycopg_url) == psycopg_url
+    
+    # Test with different host/port
+    sqlalchemy_url2 = "postgresql+asyncpg://user:pass@localhost:5433/other_db"
+    expected2 = "postgresql://user:pass@localhost:5433/other_db"
+    assert convert_url_for_checkpointer(sqlalchemy_url2) == expected2

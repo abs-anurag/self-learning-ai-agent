@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.core.logging import get_logger
 from backend.db.models import AgentEvent, TaskRun, TaskStatus
-from backend.db.session import async_session_factory
+from backend.db.session import _get_async_session_factory
 from backend.events.publisher import EventPublisher, RedisEventPublisher
 from backend.events.schema import (
     EventCreate,
@@ -72,7 +72,7 @@ class EventService:
         session_factory: Optional[async_sessionmaker[AsyncSession]] = None,
         publisher: Optional[EventPublisher] = None,
     ) -> None:
-        self.session_factory = session_factory or async_session_factory
+        self.session_factory = session_factory or _get_async_session_factory()
         self.publisher = publisher or RedisEventPublisher()
 
     async def emit_event(

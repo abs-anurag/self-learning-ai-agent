@@ -15,7 +15,7 @@ from backend.api.dependencies import get_db, get_db_session
 from backend.api.security.auth import authenticate_api_key
 from backend.core.logging import get_logger
 from backend.db.models import Task, TaskRun, TaskStatus, User
-from backend.db.session import async_session_factory
+from backend.db.session import _get_async_session_factory
 from backend.events.publisher import RedisEventPublisher
 from backend.events.schema import EventEnvelope
 from backend.events.service import EventService
@@ -56,7 +56,7 @@ class WebSocketManager:
         session_factory: Optional[async_sessionmaker[AsyncSession]] = None,
     ) -> None:
         self.event_service = event_service or EventService()
-        self.session_factory = session_factory or async_session_factory
+        self.session_factory = session_factory or _get_async_session_factory()
 
     @contextlib.asynccontextmanager
     async def _get_db_session(self, websocket: WebSocket) -> AsyncIterator[AsyncSession]:

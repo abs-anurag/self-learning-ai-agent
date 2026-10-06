@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
+import contextvars
+from contextvars import ContextVar
 from typing import Any, AsyncIterator, Dict, Optional, Union
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -39,8 +41,60 @@ from backend.db.session import (
 from backend.events.publisher import EventPublisher
 from backend.events.schema import EventEnvelope, EventType
 from backend.events.service import EventService
-
 logger = get_logger(__name__)
+
+# -- Runtime Context Variable ------------------------------------
+
+_runtime_context: contextvars.ContextVar[Optional["AgentRuntime"]] = contextvars.ContextVar(
+    "agent_runtime", default=None
+)
+
+
+def get_runtime(config: Optional[Any] = None) -> Optional["AgentRuntime"]:
+    """Get the current AgentRuntime from context variable or config dict."""
+    runtime = _runtime_context.get()
+    if runtime is not None:
+        return runtime
+    if isinstance(config, dict) and config.get("runtime"):
+        return config.get("runtime")
+    return None
+
+
+def set_runtime(runtime: "AgentRuntime") -> contextvars.Token:
+    """Set the current AgentRuntime in context variable and return token for reset."""
+    return _runtime_context.set(runtime)
+
+
+def reset_runtime(token: contextvars.Token) -> None:
+    """Reset the AgentRuntime context variable using token."""
+    _runtime_context.reset(token)
+
+
+# -- Database Session Context Variable -----------------------------
+
+_db_session_context: contextvars.ContextVar[Optional[AsyncSession]] = contextvars.ContextVar(
+    "agent_db_session", default=None
+)
+
+
+def get_db_session(config: Optional[Any] = None) -> Optional[AsyncSession]:
+    """Get the current AsyncSession from context variable or config dict."""
+    session = _db_session_context.get()
+    if session is not None:
+        return session
+    if isinstance(config, dict) and config.get("db_session"):
+        return config.get("db_session")
+    return None
+
+
+def set_db_session(db_session: AsyncSession) -> contextvars.Token:
+    """Set the current AsyncSession in context variable and return token for reset."""
+    return _db_session_context.set(db_session)
+
+
+def reset_db_session(token: contextvars.Token) -> None:
+    """Reset the db_session context variable using token."""
+    _db_session_context.reset(token)
 
 
 # -- Provider Factory --------------------------------------------
@@ -66,7 +120,7 @@ def get_llm_provider(
     elif resolved_mode in (ExecutionMode.LIVE, "live"):
         return AnthropicProvider(**kwargs)
     else:
-        logger.warning("Unrecognized execution mode '%s'; defaulting to FixtureProvider.", resolved_mode)
+        logger.warning("Unrecognized execution mode \'%s\'; defaulting to FixtureProvider.", resolved_mode)
         return FixtureProvider(**kwargs)
 
 
@@ -130,6 +184,14 @@ class AgentRuntime:
             session=session,
         )
 
+    async def close(self) -> None:
+        """Close any runtime resources."""
+        if hasattr(self.event_service, "close"):
+            try:
+                await self.event_service.close()
+            except Exception:
+                pass
+
     @asynccontextmanager
     async def checkpointer_context(
         self,
@@ -145,6 +207,9 @@ class AgentRuntime:
         4. Connection is closed automatically when context exits.
         """
         target_url = url or settings.POSTGRES_URL.get_secret_value()
+        # Convert SQLAlchemy URL format (postgresql+asyncpg://) to psycopg format (postgresql://)
+        if target_url.startswith("postgresql+asyncpg://"):
+            target_url = target_url.replace("postgresql+asyncpg://", "postgresql://", 1)
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
@@ -247,80 +312,131 @@ class AgentRuntime:
                 state["task_type"] = task_type
 
         # -- Per-invocation checkpointer lifecycle (BLUEPRINT.md §8) --
-        async with self.checkpointer_context(url=url) as saver:
-            # Compile graph with checkpointer
-            graph = build_agent_graph(checkpointer=saver)
+        # CRITICAL: We must prevent ANY post-success context-manager exit
+        # exception from propagating to the caller (Celery tasks.py), which
+        # would catch it and overwrite the committed "succeeded" status with
+        # "failed/agent_execution_error".
+        #
+        # Strategy: Track whether the authoritative status has been committed.
+        # If it has, catch and log any cleanup/context-exit exceptions instead
+        # of letting them propagate.
+        run_status_committed = False
+        final_state: Optional[dict[str, Any]] = None
 
-            # Build config with thread_id = run_id
-            config = self.get_thread_config(run_id_str)
-            # Pass runtime, settings into node config
-            config["runtime"] = self
-            config["settings"] = settings
+        try:
+            async with self.checkpointer_context(url=url) as saver:
+                # Compile graph with checkpointer
+                graph = build_agent_graph(checkpointer=saver)
 
-            # Provide a db_session for nodes that need it (evaluate, learn, etc.)
-            # The session is created from a separate per-invocation engine
-            # (node_engine) distinct from the checkpointer engine.
-            from sqlalchemy.ext.asyncio import async_sessionmaker
-            from backend.db.session import create_engine_instance
+                # Build config with thread_id = run_id
+                config = self.get_thread_config(run_id_str)
+                # Pass runtime, settings into node config
+                config["runtime"] = self
+                config["settings"] = settings
 
-            node_engine = create_engine_instance(url)
-            node_session_factory = async_sessionmaker(
-                bind=node_engine,
-                class_=AsyncSession,
-                expire_on_commit=False,
-                autoflush=False,
-            )
+                # Provide a db_session for nodes that need it (evaluate, learn, etc.)
+                # The session is created from a separate per-invocation engine
+                # (node_engine) distinct from the checkpointer engine.
+                from sqlalchemy.ext.asyncio import async_sessionmaker
+                from backend.db.session import create_engine_instance
 
-            try:
-                async with node_session_factory() as db_session:
-                    config["db_session"] = db_session
+                node_engine = create_engine_instance(url)
+                node_session_factory = async_sessionmaker(
+                    bind=node_engine,
+                    class_=AsyncSession,
+                    expire_on_commit=False,
+                    autoflush=False,
+                )
 
-                    # Execute the graph
-                    try:
-                        final_state = await graph.ainvoke(state, config=config)
-                    except Exception as exc:
-                        logger.error(
-                            f"[AgentRuntime.run] Graph execution failed for run {run_id_str}: {exc}",
-                            exc_info=True,
-                        )
-                        # Update authoritative run status to failed
+                try:
+                    async with node_session_factory() as db_session:
+                        config["db_session"] = db_session
+                        config["runtime"] = self
+                        config["settings"] = settings
+
+                        # CRITICAL: Set ContextVars so nodes can call
+                        # get_runtime() and get_db_session() during execution.
+                        # This is the fix for the "No runtime in context" /
+                        # "No db_session in context" failures.
+                        runtime_token = set_runtime(self)
+                        db_session_token = set_db_session(db_session)
+
                         try:
-                            await self._update_run_status(
-                                run_id_str,
-                                "failed",
-                                termination_reason="graph_execution_error",
+                            # Execute the graph
+                            try:
+                                final_state = await graph.ainvoke(state, config=config)
+                            except Exception as exc:
+                                logger.error(
+                                    f"[AgentRuntime.run] Graph execution failed for run {run_id_str}: {exc}",
+                                    exc_info=True,
+                                )
+                                # Update authoritative run status to failed
+                                try:
+                                    await self._update_run_status(
+                                        run_id_str,
+                                        "failed",
+                                        termination_reason="graph_execution_error",
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        f"[AgentRuntime.run] Failed to update run status after graph error for {run_id_str}"
+                                    )
+                                raise
+
+                            # Process final state and update authoritative status
+                            final_status = final_state.get("status", "failed")
+                            termination_reason = final_state.get("termination_reason") or "unknown"
+
+                            logger.info(
+                                f"[AgentRuntime.run] Graph execution complete for run {run_id_str}: "
+                                f"status={final_status}, termination_reason={termination_reason}"
                             )
-                        except Exception:
-                            logger.warning(
-                                f"[AgentRuntime.run] Failed to update run status after graph error for {run_id_str}"
-                            )
-                        raise
 
-                    # Process final state and update authoritative status
-                    final_status = final_state.get("status", "failed")
-                    termination_reason = final_state.get("termination_reason") or "unknown"
+                            # Update authoritative task/run status in PostgreSQL
+                            try:
+                                await self._update_run_status(
+                                    run_id_str,
+                                    final_status,
+                                    termination_reason=termination_reason,
+                                    iteration_count=final_state.get("iteration_count"),
+                                )
+                            except Exception as exc:
+                                logger.error(
+                                    f"[AgentRuntime.run] Failed to update run status for {run_id_str}: {exc}",
+                                    exc_info=True,
+                                )
 
-                    logger.info(
-                        f"[AgentRuntime.run] Graph execution complete for run {run_id_str}: "
-                        f"status={final_status}, termination_reason={termination_reason}"
-                    )
+                            # Mark that we've committed the authoritative status.
+                            # After this point, no cleanup exception should overwrite it.
+                            run_status_committed = True
 
-                    # Update authoritative task/run status in PostgreSQL
-                    try:
-                        await self._update_run_status(
-                            run_id_str,
-                            final_status,
-                            termination_reason=termination_reason,
-                        )
-                    except Exception as exc:
-                        logger.error(
-                            f"[AgentRuntime.run] Failed to update run status for {run_id_str}: {exc}",
-                            exc_info=True,
-                        )
+                            return final_state
+                        finally:
+                            # CRITICAL: Always reset ContextVars after graph execution
+                            reset_db_session(db_session_token)
+                            reset_runtime(runtime_token)
+                finally:
+                    await dispose_engine(node_engine)
 
+        except Exception as exc:
+            # CRITICAL GUARD: If the authoritative status was already committed
+            # (succeeded or failed), this is a post-success cleanup exception
+            # (e.g., checkpointer __aexit__, node_session __aexit__).
+            # We must NOT let it propagate to tasks.py where it would be caught
+            # and call _mark_run_failed(), overwriting the committed status.
+            if run_status_committed:
+                logger.warning(
+                    f"[AgentRuntime.run] Post-completion cleanup exception for run {run_id_str} "
+                    f"(status already committed, ignoring): {type(exc).__name__}: {exc}"
+                )
+                # Return the final_state that was produced before the cleanup exception
+                if final_state is not None:
                     return final_state
-            finally:
-                await dispose_engine(node_engine)
+                # Defensive: should not reach here if run_status_committed is True
+                return state
+            else:
+                # Genuine pre-completion failure: let it propagate
+                raise
 
     async def _update_run_status(
         self,
@@ -328,6 +444,7 @@ class AgentRuntime:
         status: Union[TaskStatus, str],
         *,
         termination_reason: Optional[str] = None,
+        iteration_count: Optional[int] = None,
         final_response: Optional[str] = None,
         error: Optional[str] = None,
     ) -> None:
@@ -336,6 +453,8 @@ class AgentRuntime:
 
         Source: BLUEPRINT.md §1, §9: AgentState.status is execution-local;
         the authoritative status for execution is task_runs.status in PostgreSQL.
+
+        :param iteration_count: Optional iteration count for the run.
         """
         from sqlalchemy import select, update
         from backend.db.models import Task, TaskRun
@@ -355,6 +474,7 @@ class AgentRuntime:
                     .values(
                         status=status_value,
                         termination_reason=termination_reason,
+                        iteration_count=iteration_count,
                     )
                 )
                 await session.execute(run_stmt)

@@ -43,7 +43,7 @@ import logging
 import uuid
 from typing import Any
 
-from backend.agent.runtime import AgentRuntime
+from backend.agent.runtime import AgentRuntime, get_db_session, get_runtime
 from backend.agent.state import AgentState
 from backend.core.config import settings
 from backend.learning.candidate import extract_candidate_recipe
@@ -79,8 +79,8 @@ async def learn_node(state: AgentState, config: dict) -> dict[str, Any]:
     """
     logger.info(f"[learn_node] Starting learning for task {state['task_id']}, run {state['run_id']}")
 
-    runtime: AgentRuntime | None = config.get("runtime")
-    db_session = config.get("db_session")
+    runtime: AgentRuntime | None = get_runtime(config) or config.get("runtime")
+    db_session = get_db_session(config) or config.get("db_session")
     config_settings = config.get("settings", settings)
 
     # Verify we are in success branch (should be true by routing)

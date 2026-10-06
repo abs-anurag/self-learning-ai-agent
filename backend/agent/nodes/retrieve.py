@@ -29,6 +29,7 @@ import logging
 from typing import Any
 
 from backend.agent.state import AgentState
+from backend.agent.runtime import get_db_session, get_runtime
 from backend.core.config import settings
 from backend.learning.recipes import increment_recipe_usage
 from backend.memory.embeddings import build_query_embedding_text, generate_embedding
@@ -49,7 +50,6 @@ async def retrieve_node(state: AgentState, config: dict) -> dict:
     Args:
         state: Current AgentState with goal, understood_task, task_type, user_id.
         config: Configuration dict containing:
-            - db_session: AsyncSession for database operations
             - settings: Application settings (optional, uses global if not provided)
 
     Returns:
@@ -66,15 +66,16 @@ async def retrieve_node(state: AgentState, config: dict) -> dict:
         - Retrieved recipes have usage_count incremented in database
         - Uses RECIPE_SIMILARITY_THRESHOLD from config (default: 0.80)
     """
+    task_id = state.get("task_id", "")
+    task_type = state.get("task_type", "")
     logger.info(
-        f"[retrieve_node] Starting recipe retrieval for task {state['task_id']}, "
-        f"task_type={state['task_type']}"
+        f"[retrieve_node] Starting recipe retrieval for task {task_id}, "
+        f"task_type={task_type}"
     )
 
     # Extract required state fields
     goal = state.get("goal", "")
     understood_task = state.get("understood_task", "")
-    task_type = state.get("task_type", "")
     user_id = state.get("user_id", "")
 
     # Validate required fields
@@ -99,10 +100,10 @@ async def retrieve_node(state: AgentState, config: dict) -> dict:
             "retrieval_count": 0,
         }
 
-    # Get database session from config
-    db_session = config.get("db_session")
+    # Get database session from context variable or config
+    db_session = get_db_session(config)
     if not db_session:
-        logger.error("[retrieve_node] No db_session in config, skipping retrieval")
+        logger.error("[retrieve_node] No db_session in context, skipping retrieval")
         return {
             "retrieved_recipes": [],
             "retrieval_count": 0,
@@ -182,7 +183,7 @@ async def retrieve_node(state: AgentState, config: dict) -> dict:
                     f"[retrieve_node] Incremented usage_count for recipe {recipe.id}"
                 )
             except Exception as e:
-                # Log but don't halt - usage counter is non-critical
+                # Log but don'"'"'t halt - usage counter is non-critical
                 logger.warning(
                     f"[retrieve_node] Failed to increment usage_count for recipe {recipe.id}: {e}"
                 )
@@ -194,9 +195,25 @@ async def retrieve_node(state: AgentState, config: dict) -> dict:
             logger.warning(f"[retrieve_node] Failed to commit usage count updates: {e}")
             # Non-fatal - retrieval itself succeeded
 
-        logger.info(
-            f"[retrieve_node] Recipe retrieval complete: {retrieval_count} recipes retrieved"
-        )
+        # Emit memory_retrieved event per BLUEPRINT.md §14
+        runtime = get_runtime(config)
+        if runtime:
+            try:
+                await runtime.emit_event(
+                    task_id=state["task_id"],
+                    run_id=state["run_id"],
+                    user_id=state["user_id"],
+                    event_type="memory_retrieved",
+                    status="running",
+                    metadata={
+                        "retrieval_count": retrieval_count,
+                        "task_type": task_type,
+                    },
+                    session=db_session,
+                )
+                logger.debug("[retrieve_node] Emitted memory_retrieved event")
+            except Exception as e:
+                logger.warning(f"[retrieve_node] Failed to emit memory_retrieved event: {e}")
 
         # Return state update with formatted string and metadata
         return {
@@ -213,7 +230,7 @@ async def retrieve_node(state: AgentState, config: dict) -> dict:
         }
 
     except Exception as e:
-        # Unexpected errors - log but don't halt execution
+        # Unexpected errors - log but don'"'"'t halt execution
         # Zero retrieval is a valid fallback for novel tasks
         logger.error(
             f"[retrieve_node] Unexpected error during recipe retrieval: {e}",

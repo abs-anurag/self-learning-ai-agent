@@ -209,24 +209,24 @@ class TestMarkRunFailed:
     """Tests for _mark_run_failed function."""
 
     def test_mark_run_failed_signature(self) -> None:
-        """Verify _mark_run_failed has correct signature (run_id, termination_reason)."""
+        """Verify _mark_run_failed has correct signature (session_factory, run_id, termination_reason)."""
         import inspect
         sig = inspect.signature(_mark_run_failed)
         params = list(sig.parameters.keys())
-        assert params == ["run_id", "termination_reason"]
-        assert len(params) == 2
+        assert params == ["session_factory", "run_id", "termination_reason"]
+        assert len(params) == 3
 
 
 class TestMarkRunStatus:
     """Tests for _mark_run_status function."""
 
     def test_mark_run_status_signature(self) -> None:
-        """Verify _mark_run_status has correct signature (run_id, status)."""
+        """Verify _mark_run_status has correct signature (session_factory, run_id, status)."""
         import inspect
         sig = inspect.signature(_mark_run_status)
         params = list(sig.parameters.keys())
-        assert params == ["run_id", "status"]
-        assert len(params) == 2
+        assert params == ["session_factory", "run_id", "status"]
+        assert len(params) == 3
 
 
 # -- Celery Task Configuration Tests ----------------------------------
@@ -291,5 +291,93 @@ class TestTaskTypeArchitecture:
         assert "task_type" in tr_columns
 
 
+
+class TestStateMachineGuards:
+    @pytest.mark.asyncio
+    async def test_runtime_run_catches_post_success_checkpointer_exception(self) -> None:
+        """
+        Verify that when graph execution succeeds and run status is committed,
+        a subsequent checkpointer cleanup exception is caught and NOT propagated,
+        returning the successful final state instead.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from contextlib import asynccontextmanager
+        from uuid import uuid4
+
+        from backend.agent.runtime import AgentRuntime
+        from backend.agent.state import create_initial_state, AgentState
+        from backend.db.models import TaskStatus
+
+        run_id = uuid4()
+        task_id = uuid4()
+        user_id = uuid4()
+        goal = "Test goal"
+
+        # Create a successful final state
+        successful_state = create_initial_state(
+            task_id=str(task_id),
+            run_id=str(run_id),
+            user_id=str(user_id),
+            goal=goal,
+        )
+        successful_state["status"] = "succeeded"
+        successful_state["termination_reason"] = "completed"
+        successful_state["final_response"] = "Test completed successfully"
+
+        # Mock graph that returns successful state
+        mock_graph = AsyncMock()
+        mock_graph.ainvoke = AsyncMock(return_value=successful_state)
+
+        # Track if _update_run_status was called with succeeded
+        update_run_status_calls = []
+
+        async def mock_update_run_status(run_id_str, status, *, termination_reason=None, **kwargs):
+            update_run_status_calls.append({
+                "run_id": run_id_str,
+                "status": status,
+                "termination_reason": termination_reason,
+            })
+
+        # Create runtime instance
+        runtime = AgentRuntime()
+
+        # Patch checkpointer_context to raise exception on __aexit__
+        @asynccontextmanager
+        async def mock_checkpointer_context(self, url=None):
+            saver = MagicMock()
+            try:
+                yield saver
+            finally:
+                # Raise exception on cleanup to simulate checkpointer failure
+                raise RuntimeError("Checkpointer cleanup failed")
+
+        with patch("backend.agent.graph.build_agent_graph", return_value=mock_graph), \
+             patch("backend.agent.runtime.AgentRuntime.checkpointer_context", mock_checkpointer_context), \
+             patch.object(runtime, "_update_run_status", side_effect=mock_update_run_status), \
+             patch("backend.agent.runtime.create_engine_instance", return_value=MagicMock()), \
+             patch("backend.agent.runtime.async_sessionmaker"), \
+             patch("backend.agent.runtime.dispose_engine", new_callable=AsyncMock):
+
+            # Call runtime.run() - should NOT raise the checkpointer exception
+            result = await runtime.run(
+                run_id=run_id,
+                task_id=task_id,
+                user_id=user_id,
+                goal=goal,
+            )
+
+        # Verify successful state is returned
+        assert result == successful_state
+        assert result["status"] == "succeeded"
+        assert result["termination_reason"] == "completed"
+
+        # Verify _update_run_status was called with succeeded status
+        assert len(update_run_status_calls) == 1
+        call = update_run_status_calls[0]
+        assert call["status"] == "succeeded"
+        assert call["termination_reason"] == "completed"
+
+        # Verify graph was invoked
+        mock_graph.ainvoke.assert_called_once()
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

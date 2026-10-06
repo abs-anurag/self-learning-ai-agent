@@ -1,4 +1,4 @@
-﻿"""
+"""
 Composite evaluation scorer for the Self-Learning AI Agent.
 
 Source of truth: BLUEPRINT.md §12.
@@ -25,7 +25,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.agent.runtime import AgentRuntime
+from backend.agent.runtime import AgentRuntime, get_runtime, get_db_session
 from backend.agent.state import AgentState
 from backend.core.config import Settings, settings
 from backend.db.models import Evaluation
@@ -39,6 +39,9 @@ def compute_tool_success(state: AgentState) -> bool:
         return True
     for call in tool_calls:
         if isinstance(call, dict):
+            # Internal/no-op steps are not real tool calls and don'"'"'t affect tool_success
+            if call.get("tool") == "internal":
+                continue
             if call.get("error") or call.get("status") == "failed":
                 return False
             error_code = call.get("error_code", "")
@@ -62,17 +65,17 @@ def check_final_answer_present(state: AgentState) -> bool:
 
 
 async def evaluate_node(state: AgentState, config: dict) -> dict[str, Any]:
-    logger.info(f"[evaluate_node] Starting evaluation for task {state['task_id']}, run {state['run_id']}, iteration {state['iteration_count'] + 1}")
+    task_id = state.get("task_id", "")
+    run_id = state.get("run_id", "")
+    current_iter = state.get("iteration_count", 0) + 1
+    logger.info(f"[evaluate_node] Starting evaluation for task {task_id}, run {run_id}, iteration {current_iter}")
 
-    db_session: AsyncSession | None = config.get("db_session")
-    runtime: AgentRuntime | None = config.get("runtime")
-    cfg_settings: Settings = config.get("settings", settings)
+    db_session: AsyncSession | None = get_db_session(config)
+    runtime: AgentRuntime | None = get_runtime(config)
+    cfg_settings: Settings = config.get("settings") or config.get("metadata", {}).get("settings", settings)
 
-    if not db_session:
-        logger.error("[evaluate_node] No db_session in config")
-        return _error_evaluation_state(state, "Missing db_session")
     if not runtime:
-        logger.error("[evaluate_node] No runtime in config")
+        logger.error("[evaluate_node] No runtime in context")
         return _error_evaluation_state(state, "Missing runtime")
 
     try:
@@ -94,7 +97,7 @@ async def evaluate_node(state: AgentState, config: dict) -> dict[str, Any]:
             and final_answer_present
         )
 
-        iteration_count = state["iteration_count"] + 1
+        iteration_count = state.get("iteration_count", 0) + 1
         tool_call_count = len(state.get("tool_calls", []))
 
         evaluation_data = {
@@ -111,24 +114,27 @@ async def evaluate_node(state: AgentState, config: dict) -> dict[str, Any]:
 
         logger.info(f"[evaluate_node] Evaluation complete: task_success={task_success}, judge_score={judge_score}, deterministic_pass={deterministic_pass}, tool_success={tool_success}, final_answer_present={final_answer_present}, iteration_count={iteration_count}")
 
-        try:
-            evaluation_row = Evaluation(
-                run_id=state["run_id"],
-                user_id=state["user_id"],
-                iteration_count=iteration_count,
-                task_success=task_success,
-                deterministic_pass=deterministic_pass,
-                tool_success=tool_success,
-                judge_score=Decimal(str(judge_score)),
-                tool_call_count=tool_call_count,
-                payload={"judge_reasoning": judge_reasoning} if judge_reasoning else {},
-            )
-            db_session.add(evaluation_row)
-            await db_session.flush()
-            logger.debug(f"[evaluate_node] Persisted evaluation row for iteration {iteration_count}")
-        except Exception as e:
-            logger.error(f"[evaluate_node] Failed to persist evaluation: {e}")
-            await db_session.rollback()
+        if db_session:
+            try:
+                evaluation_row = Evaluation(
+                    run_id=state["run_id"],
+                    user_id=state["user_id"],
+                    iteration_count=iteration_count,
+                    task_success=task_success,
+                    deterministic_pass=deterministic_pass,
+                    tool_success=tool_success,
+                    judge_score=Decimal(str(judge_score)),
+                    tool_call_count=tool_call_count,
+                    payload={"judge_reasoning": judge_reasoning} if judge_reasoning else {},
+                )
+                db_session.add(evaluation_row)
+                await db_session.flush()
+                logger.debug(f"[evaluate_node] Persisted evaluation row for iteration {iteration_count}")
+            except Exception as e:
+                logger.error(f"[evaluate_node] Failed to persist evaluation: {e}")
+                await db_session.rollback()
+        else:
+            logger.warning("[evaluate_node] No db_session in context, skipping persistence")
 
         try:
             event_metadata = {
