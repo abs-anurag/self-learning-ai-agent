@@ -272,7 +272,8 @@ def route_after_evaluate(state: AgentState) -> str:
 
     iteration_count has already been incremented inside evaluate.
     """
-    if state["evaluation"].get("task_success", False):
+    eval_info = state.get("evaluation") or {}
+    if eval_info.get("task_success", False):
         return "maybe_learn"
 
     # Check max iterations boundary (after 3 completed iterations, state["iteration_count"] == 3)

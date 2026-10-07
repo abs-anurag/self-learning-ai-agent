@@ -34,24 +34,43 @@ async def promote_recipe_to_trusted(
         return None
 
     try:
+        from decimal import Decimal
+
+        source_task_id = uuid.UUID(state["task_id"])
         user_id = uuid.UUID(state["user_id"])
         problem_pattern = candidate["problem_pattern"]
         task_type = candidate["task_type"]
         recommended_strategy = candidate["recommended_strategy"]
-        successful_steps = candidate["successful_steps"]
-        tools_used = candidate["tools_used"]
+        successful_steps = candidate.get("successful_steps", [])
+        failed_steps = candidate.get("failed_steps", [])
+        tools_used = candidate.get("tools_used", [])
+        context = candidate.get("context") or state.get("goal") or "task"
+        lesson = candidate.get("lesson") or "Extracted strategy from successful execution."
+        evidence = candidate.get("evidence") or "Validated by judge evaluation."
+
+        eval_data = state.get("evaluation", {})
+        score = Decimal(str(round(float(eval_data.get("judge_score", 9.0)), 1)))
+        det_pass = bool(eval_data.get("deterministic_pass", True))
 
         # Generate 384-d vector embedding
         embedding = generate_embedding(f"{problem_pattern} {recommended_strategy}")
 
         recipe = TaskRecipe(
             id=uuid.uuid4(),
+            source_task_id=source_task_id,
             user_id=user_id,
             task_type=task_type,
             problem_pattern=problem_pattern,
+            context=context,
             recommended_strategy=recommended_strategy,
             successful_steps=successful_steps,
+            failed_steps=failed_steps,
             tools_used=tools_used,
+            lesson=lesson,
+            evidence=evidence,
+            evaluation_score=score,
+            deterministic_pass=det_pass,
+            generalizable=True,
             embedding=embedding,
             status=RecipeStatus.TRUSTED.value,
             usage_count=0,
@@ -62,6 +81,7 @@ async def promote_recipe_to_trusted(
         logger.info("Successfully promoted new trusted recipe %s for user %s", recipe.id, user_id)
         return recipe
     except Exception as exc:
+        await session.rollback()
         logger.error("Failed to promote recipe to task_recipes: %s", exc)
         return None
 
@@ -88,4 +108,5 @@ async def record_reuse_success(
         await session.flush()
         logger.info("Incremented success_after_reuse for recipe %s", recipe_id)
     except Exception as exc:
+        await session.rollback()
         logger.warning("Failed to record reuse success for recipe %s: %s", recipe_id, exc)

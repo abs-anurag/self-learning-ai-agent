@@ -8,6 +8,7 @@ updates task and task_run rows atomically, and emits terminal telemetry.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any, Dict
 from sqlalchemy import update
@@ -28,11 +29,9 @@ async def respond_node(state: AgentState) -> dict[str, Any]:
     Generates user-facing response, persists experience, transitions status,
     and emits task_completed or task_failed.
     """
+    logger.info("BEFORE respond: entering respond_node for run %s", state.get("run_id"))
     runtime = get_current_runtime()
     llm = runtime.llm_provider
-
-    resp_dict = await llm.respond(state)
-    final_response = resp_dict.get("final_response", "")
 
     eval_info = state.get("evaluation", {})
     task_success = eval_info.get("task_success", False)
@@ -46,6 +45,33 @@ async def respond_node(state: AgentState) -> dict[str, Any]:
         termination_reason = state.get("termination_reason") or "max_iterations"
         terminal_event = EventType.TASK_FAILED
 
+    # LLM response generation protected by deterministic timeout and fallback
+    final_response = ""
+    try:
+        resp_dict = await asyncio.wait_for(llm.respond(state), timeout=25.0)
+        final_response = resp_dict.get("final_response", "")
+    except asyncio.TimeoutError:
+        logger.warning(
+            "llm.respond timed out in respond_node for run %s; synthesizing fallback response.",
+            state.get("run_id"),
+        )
+    except Exception as exc:
+        logger.warning(
+            "llm.respond failed in respond_node for run %s: %s; synthesizing fallback response.",
+            state.get("run_id"),
+            exc,
+        )
+
+    if not final_response:
+        if task_success:
+            final_response = "Task execution completed successfully."
+        elif termination_reason == "repeated_failure":
+            final_response = "Task stopped: identical failure occurred repeatedly."
+        elif termination_reason == "max_iterations":
+            final_response = "Task stopped: maximum allowable iterations (3) reached."
+        else:
+            final_response = f"Task stopped due to {termination_reason or 'unresolved issue'}."
+
     task_id_uuid = uuid.UUID(state["task_id"])
     run_id_uuid = uuid.UUID(state["run_id"])
     user_id_uuid = uuid.UUID(state["user_id"])
@@ -58,40 +84,45 @@ async def respond_node(state: AgentState) -> dict[str, Any]:
     # Persist Experience and update DB task & task_run status
     if runtime.session_factory is not None:
         try:
+            logger.info("BEFORE task status = %s in respond_node for run %s", final_status, run_id_uuid)
             async with runtime.session_factory() as active_session:
-                # 1. Record episodic experience per BLUEPRINT.md §10
-                await record_experience(
-                    session=active_session,
-                    task_id=task_id_uuid,
-                    run_id=run_id_uuid,
-                    user_id=user_id_uuid,
-                    task_type=state.get("task_type", "research"),
-                    tools_used=tools_used,
-                    outcome_summary=final_response,
-                )
-
-                # 2. Update task_runs status and termination_reason
-                run_update = (
-                    update(TaskRun)
-                    .where(TaskRun.id == run_id_uuid)
-                    .values(
-                        status=final_status,
-                        termination_reason=termination_reason,
-                        iteration_count=state.get("iteration_count", 0),
+                try:
+                    # 1. Record episodic experience per BLUEPRINT.md §10
+                    await record_experience(
+                        session=active_session,
+                        task_id=task_id_uuid,
+                        run_id=run_id_uuid,
+                        user_id=user_id_uuid,
+                        task_type=state.get("task_type", "research"),
+                        tools_used=tools_used,
+                        outcome_summary=final_response,
                     )
-                )
-                await active_session.execute(run_update)
 
-                # 3. Update tasks status
-                task_update = (
-                    update(Task)
-                    .where(Task.id == task_id_uuid)
-                    .values(status=final_status)
-                )
-                await active_session.execute(task_update)
+                    # 2. Update task_runs status and termination_reason
+                    run_update = (
+                        update(TaskRun)
+                        .where(TaskRun.id == run_id_uuid)
+                        .values(
+                            status=final_status,
+                            termination_reason=termination_reason,
+                            iteration_count=state.get("iteration_count", 0),
+                        )
+                    )
+                    await active_session.execute(run_update)
 
-                await active_session.commit()
-                logger.info("Updated task %s and run %s to %s", task_id_uuid, run_id_uuid, final_status)
+                    # 3. Update tasks status
+                    task_update = (
+                        update(Task)
+                        .where(Task.id == task_id_uuid)
+                        .values(status=final_status)
+                    )
+                    await active_session.execute(task_update)
+
+                    await active_session.commit()
+                    logger.info("AFTER task status = %s: updated task %s and run %s", final_status, task_id_uuid, run_id_uuid)
+                except Exception as inner_exc:
+                    await active_session.rollback()
+                    raise inner_exc
         except Exception as exc:
             logger.error("DB error in respond_node: %s", exc)
 
@@ -112,6 +143,8 @@ async def respond_node(state: AgentState) -> dict[str, Any]:
         )
     except Exception as exc:
         logger.warning("Failed to emit terminal event: %s", exc)
+
+    logger.info("AFTER respond: finished respond_node for run %s with status %s", run_id_uuid, final_status)
 
     return {
         "final_response": final_response,

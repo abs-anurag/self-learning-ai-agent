@@ -87,6 +87,7 @@ async def evaluate_quality_gate(
                         )
                         return "skip", f"Duplicate strategy detected (similarity {sim:.2f})."
         except Exception as exc:
+            await session.rollback()
             logger.warning("Duplicate check failed: %s; proceeding with candidate_only", exc)
             return "candidate_only", f"Duplicate check error: {exc}"
 

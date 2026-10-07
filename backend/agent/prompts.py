@@ -82,15 +82,16 @@ Available Tools:
 {tools_spec}
 
 Instructions:
-- If a tool is required for this step, specify the tool name and exact parameters.
-- If no tool is needed or this step is direct synthesis, set tool to null and provide the direct response text.
+- If a tool is required for this step, set call_tool to true, specify tool_name and exact parameters.
+- If no tool is needed or this step is direct knowledge/reasoning/synthesis, set call_tool to false, tool_name to null, and write your complete, comprehensive answer or analysis in "draft_answer".
 
 Respond in JSON format:
 {{
   "call_tool": true | false,
   "tool_name": "calculator" | "web_search" | "file_reader" | "code_executor" | null,
   "parameters": {{}},
-  "thought": "Brief reason for this action"
+  "thought": "Reason for this action",
+  "draft_answer": "Complete direct answer, solution, code, or explanation when call_tool is false"
 }}
 """
 

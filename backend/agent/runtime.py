@@ -25,10 +25,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from backend.agent.providers import (
     AnthropicProvider,
     FixtureProvider,
+    GeminiProvider,
     LLMProvider,
 )
 from backend.agent.state import AgentState
-from backend.core.config import ExecutionMode, settings
+from backend.core.config import ExecutionMode, LLMProviderName, settings
 from backend.core.logging import get_logger
 from backend.db.session import (
     async_session_factory,
@@ -47,26 +48,48 @@ logger = get_logger(__name__)
 
 def get_llm_provider(
     mode: Optional[Union[ExecutionMode, str]] = None,
+    provider: Optional[Union[LLMProviderName, str]] = None,
     **kwargs: Any,
 ) -> LLMProvider:
     """
-    Factory returning LLMProvider based on execution mode.
+    Factory returning LLMProvider based on execution mode and provider configuration.
     Source: BLUEPRINT.md §15.
 
-    - EXECUTION_MODE=demo -> FixtureProvider
-    - EXECUTION_MODE=live -> AnthropicProvider
+    - LLM_PROVIDER=gemini -> GeminiProvider
+    - LLM_PROVIDER=anthropic -> AnthropicProvider
+    - LLM_PROVIDER=fixture or EXECUTION_MODE=demo -> FixtureProvider
+    - EXECUTION_MODE=live defaults to GeminiProvider
     """
-    resolved_mode = mode or settings.EXECUTION_MODE
-    if isinstance(resolved_mode, str):
-        resolved_mode = resolved_mode.lower().strip()
+    # 1. Explicit provider passed by caller
+    if provider is not None:
+        p = provider.value if isinstance(provider, LLMProviderName) else str(provider).lower().strip()
+        if p in (LLMProviderName.GEMINI.value, "gemini"):
+            return GeminiProvider(**kwargs)
+        elif p in (LLMProviderName.ANTHROPIC.value, "anthropic"):
+            return AnthropicProvider(**kwargs)
+        elif p in (LLMProviderName.FIXTURE.value, "fixture"):
+            return FixtureProvider(**kwargs)
 
-    if resolved_mode in (ExecutionMode.DEMO, "demo"):
+    # 2. Explicit mode passed by caller
+    if mode is not None:
+        m = mode.value if isinstance(mode, ExecutionMode) else str(mode).lower().strip()
+        if m in (ExecutionMode.DEMO.value, "demo"):
+            return FixtureProvider(**kwargs)
+        elif m in (ExecutionMode.LIVE.value, "live"):
+            prov = settings.LLM_PROVIDER
+            p = prov.value if isinstance(prov, LLMProviderName) else str(prov).lower().strip()
+            if p in (LLMProviderName.ANTHROPIC.value, "anthropic"):
+                return AnthropicProvider(**kwargs)
+            return GeminiProvider(**kwargs)
+
+    # 3. Environment settings
+    if settings.EXECUTION_MODE == ExecutionMode.DEMO or settings.LLM_PROVIDER == LLMProviderName.FIXTURE:
         return FixtureProvider(**kwargs)
-    elif resolved_mode in (ExecutionMode.LIVE, "live"):
+
+    if settings.LLM_PROVIDER == LLMProviderName.ANTHROPIC:
         return AnthropicProvider(**kwargs)
-    else:
-        logger.warning("Unrecognized execution mode '%s'; defaulting to FixtureProvider.", resolved_mode)
-        return FixtureProvider(**kwargs)
+
+    return GeminiProvider(**kwargs)
 
 
 # -- Agent Runtime Context ---------------------------------------
@@ -138,31 +161,46 @@ class AgentRuntime:
         Async context manager managing the checkpointer lifecycle per BLUEPRINT.md §8:
 
         Inside each Celery task invocation:
-        1. Create a fresh async engine.
-        2. Instantiate checkpointer: saver = AsyncPostgresSaver(engine).
-        3. Call await saver.setup() if required.
-        4. Yield saver for execution.
-        5. Close and dispose the engine before exiting.
+        1. Create a fresh async engine for general DB tasks.
+        2. Derive standard psycopg-compatible postgresql:// URL.
+        3. Instantiate checkpointer: saver = AsyncPostgresSaver.from_conn_string(conn_str).
+        4. Call await saver.setup() to run idempotent migrations if needed.
+        5. Yield saver for StateGraph compilation and execution.
+        6. Cleanly close checkpointer and dispose the engine before exiting.
         """
         engine: AsyncEngine = create_engine_instance(url)
+        saver_cm: Any = None
         saver: Any = None
         try:
             try:
                 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+                from backend.db.session import get_psycopg_postgres_url
 
-                saver = AsyncPostgresSaver(engine)
-                # Idempotent setup if available
+                conn_str = get_psycopg_postgres_url(url)
+                saver_cm = AsyncPostgresSaver.from_conn_string(conn_str)
+                saver = await saver_cm.__aenter__()
                 if hasattr(saver, "setup"):
                     await saver.setup()
-            except ImportError:
+            except Exception as exc:
                 logger.warning(
-                    "langgraph-checkpoint-postgres not installed; "
-                    "yielding None checkpointer for lightweight execution."
+                    "Checkpointer setup skipped: %s; yielding None checkpointer for lightweight execution.",
+                    exc,
                 )
+                if saver_cm is not None:
+                    try:
+                        await saver_cm.__aexit__(None, None, None)
+                    except Exception:
+                        pass
+                    saver_cm = None
                 saver = None
 
             yield saver
         finally:
+            if saver_cm is not None:
+                try:
+                    await saver_cm.__aexit__(None, None, None)
+                except Exception as close_exc:
+                    logger.warning("Failed to close checkpointer connection: %s", close_exc)
             await dispose_engine(engine)
 
     async def close(self) -> None:

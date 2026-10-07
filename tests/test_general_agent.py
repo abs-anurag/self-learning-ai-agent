@@ -27,7 +27,8 @@ from backend.agent.state import create_initial_state
 
 @pytest.fixture(autouse=True)
 def setup_runtime():
-    runtime = AgentRuntime(session_factory=None)
+    from backend.agent.providers import FixtureProvider
+    runtime = AgentRuntime(llm_provider=FixtureProvider(), session_factory=None)
     set_current_runtime(runtime)
     return runtime
 

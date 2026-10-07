@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 from typing import Any, Dict, Optional
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.agent.state import AgentState
@@ -93,28 +94,54 @@ async def score_and_record_evaluation(
         try:
             run_id = uuid.UUID(state["run_id"])
             user_id = uuid.UUID(state["user_id"])
-            eval_record = Evaluation(
-                id=uuid.uuid4(),
-                run_id=run_id,
-                user_id=user_id,
-                iteration_count=iteration_count,
-                task_success=task_success,
-                deterministic_pass=deterministic_pass,
-                tool_success=tool_success,
-                judge_score=Decimal(str(round(judge_score, 1))),
-                tool_call_count=len(tool_calls),
-                payload={"judge_reasoning": judge_reasoning},
+
+            # Check if evaluation for this (run_id, iteration_count) already exists to prevent uq_run_iteration
+            stmt = select(Evaluation).where(
+                Evaluation.run_id == run_id,
+                Evaluation.iteration_count == iteration_count,
             )
-            session.add(eval_record)
-            await session.flush()
-            logger.info(
-                "Persisted evaluation for run %s, iteration %d: task_success=%s, score=%.1f",
-                run_id,
-                iteration_count,
-                task_success,
-                judge_score,
-            )
+            res = await session.execute(stmt)
+            existing_eval = res.scalar_one_or_none()
+
+            if existing_eval is not None:
+                existing_eval.task_success = task_success
+                existing_eval.deterministic_pass = deterministic_pass
+                existing_eval.tool_success = tool_success
+                existing_eval.judge_score = Decimal(str(round(judge_score, 1)))
+                existing_eval.tool_call_count = len(tool_calls)
+                existing_eval.payload = {"judge_reasoning": judge_reasoning}
+                await session.flush()
+                logger.info(
+                    "Updated existing evaluation for run %s, iteration %d: task_success=%s, score=%.1f",
+                    run_id,
+                    iteration_count,
+                    task_success,
+                    judge_score,
+                )
+            else:
+                eval_record = Evaluation(
+                    id=uuid.uuid4(),
+                    run_id=run_id,
+                    user_id=user_id,
+                    iteration_count=iteration_count,
+                    task_success=task_success,
+                    deterministic_pass=deterministic_pass,
+                    tool_success=tool_success,
+                    judge_score=Decimal(str(round(judge_score, 1))),
+                    tool_call_count=len(tool_calls),
+                    payload={"judge_reasoning": judge_reasoning},
+                )
+                session.add(eval_record)
+                await session.flush()
+                logger.info(
+                    "Persisted evaluation for run %s, iteration %d: task_success=%s, score=%.1f",
+                    run_id,
+                    iteration_count,
+                    task_success,
+                    judge_score,
+                )
         except Exception as exc:
+            await session.rollback()
             logger.error("Failed to record evaluation in database: %s", exc)
 
     return eval_dict

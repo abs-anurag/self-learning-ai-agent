@@ -354,8 +354,9 @@ class TestLLMProviders:
         assert isinstance(provider_str, FixtureProvider)
 
     def test_get_llm_provider_live_mode(self) -> None:
+        from backend.agent.providers.gemini import GeminiProvider
         provider = get_llm_provider(mode=ExecutionMode.LIVE)
-        assert isinstance(provider, AnthropicProvider)
+        assert isinstance(provider, (GeminiProvider, AnthropicProvider))
 
     @pytest.mark.asyncio
     async def test_fixture_provider_methods(self) -> None:

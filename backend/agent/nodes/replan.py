@@ -3,6 +3,10 @@ Replan node for METIS agent graph.
 
 Source of truth: BLUEPRINT.md §8, §14.
 Constructs revised plan addressing diagnosed failure.
+Enforces loop safety:
+- Replan budget limit: if iteration_count >= max_iterations, terminates
+- Repeated identical plan detection: if new plan == old plan, sets termination_reason = 'repeated_failure'
+- Terminal failure check
 Loops back to execute node.
 """
 
@@ -12,7 +16,7 @@ import uuid
 from typing import Any, Dict
 
 from backend.agent.runtime import get_current_runtime
-from backend.agent.state import AgentState
+from backend.agent.state import TERMINAL_REASONS, AgentState
 from backend.core.logging import get_logger
 from backend.events.schema import EventType
 
@@ -28,13 +32,37 @@ async def replan_node(state: AgentState) -> dict[str, Any]:
     runtime = get_current_runtime()
     llm = runtime.llm_provider
 
-    # Formulate revised plan
+    iteration_count = state.get("iteration_count", 0)
+    max_iterations = state.get("max_iterations", 3)
+    termination_reason = state.get("termination_reason")
+
+    # 1. Budget check: if iterations reached or terminal reason present, do not replan
+    if iteration_count >= max_iterations or termination_reason in TERMINAL_REASONS:
+        logger.info("Replan budget exhausted or terminal state reached; bypassing replan.")
+        return {
+            "current_step": "respond",
+            "termination_reason": termination_reason or "max_iterations",
+        }
+
+    # 2. Formulate revised plan
     plan_res = await llm.plan(state)
     new_plan = plan_res.get("plan", [
         "Re-evaluate requirements with corrected parameters",
         "Re-execute computation/research",
         "Verify final result",
     ])
+
+    old_plan = state.get("plan", [])
+
+    # 3. Repeated plan detection
+    if new_plan == old_plan:
+        logger.warning("Repeated identical plan detected in replan node.")
+        return {
+            "plan": new_plan,
+            "termination_reason": "repeated_failure",
+            "error": "Identical plan repeated without adaptation.",
+            "current_step": "execute",
+        }
 
     # Emit planning_started event for revised plan
     try:
@@ -45,7 +73,7 @@ async def replan_node(state: AgentState) -> dict[str, Any]:
             event_type=EventType.PLANNING_STARTED,
             status="running",
             metadata={
-                "iteration_count": state.get("iteration_count", 1),
+                "iteration_count": iteration_count,
                 "step_count": len(new_plan),
                 "is_replan": True,
             },
@@ -55,7 +83,5 @@ async def replan_node(state: AgentState) -> dict[str, Any]:
 
     return {
         "plan": new_plan,
-        # Clear tool_calls for fresh retry attempt
-        "tool_calls": [],
         "current_step": "execute",
     }

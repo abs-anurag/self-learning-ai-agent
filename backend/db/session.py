@@ -57,6 +57,20 @@ def create_engine_instance(
     )
 
 
+def get_psycopg_postgres_url(url: Optional[str] = None) -> str:
+    """
+    Return a standard postgresql:// connection string compatible with psycopg/psycopg_pool.
+    Strips SQLAlchemy async/sync driver prefixes (such as '+asyncpg' or '+psycopg').
+    Source: BLUEPRINT.md §8 LangGraph Checkpointer.
+    """
+    target_url = url or settings.POSTGRES_URL.get_secret_value()
+    if "://" in target_url:
+        scheme, remainder = target_url.split("://" , 1)
+        base_scheme = scheme.split("+")[0]
+        return f"{base_scheme}://{remainder}"
+    return target_url
+
+
 async def dispose_engine(engine: AsyncEngine) -> None:
     """
     Safely close and dispose an AsyncEngine instance.

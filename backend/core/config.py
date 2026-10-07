@@ -26,6 +26,7 @@ class ExecutionMode(str, Enum):
 class LLMProviderName(str, Enum):
     """BLUEPRINT.md S15: LLM provider abstraction selection."""
     FIXTURE = "fixture"
+    GEMINI = "gemini"
     ANTHROPIC = "anthropic"
 
 
@@ -49,7 +50,7 @@ class Settings(BaseSettings):
     # BLUEPRINT.md S2: EXECUTION_MODE=demo | live
     EXECUTION_MODE: ExecutionMode = ExecutionMode.DEMO
 
-    # BLUEPRINT.md S15: LLM_PROVIDER=fixture | anthropic
+    # BLUEPRINT.md S15: LLM_PROVIDER=fixture | gemini | anthropic
     LLM_PROVIDER: LLMProviderName = LLMProviderName.FIXTURE
 
     # -- Database -------------------------------------------------
@@ -61,11 +62,25 @@ class Settings(BaseSettings):
     # BLUEPRINT.md S23: Redis 7 broker + Pub/Sub
     REDIS_URL: str = "redis://redis:6379/0"
 
-    # -- External API keys (required in live mode) ----------------
+    # -- Google Gemini LLM Settings -------------------------------
+    GEMINI_API_KEY: SecretStr = SecretStr(
+        "gemini-placeholder-key-do-not-commit"
+    )
+    GEMINI_MODEL: str = "gemini-3.8-flash"
+    GEMINI_FALLBACK_MODELS: list[str] = Field(
+        default_factory=lambda: [
+            "gemini-3.5-flash",
+            "gemini-flash-lite-latest",
+            "gemini-flash-latest",
+        ]
+    )
+
+    # -- External API keys & Model (legacy / alternate) -----------
     # BLUEPRINT.md S17, S23: never stored in plaintext in DB/logs
     ANTHROPIC_API_KEY: SecretStr = SecretStr(
         "sk-ant-placeholder-key-do-not-commit"
     )
+    ANTHROPIC_MODEL: str = "claude-3-5-sonnet-20241022"
     TAVILY_API_KEY: SecretStr = SecretStr(
         "tvly-placeholder-key-do-not-commit"
     )

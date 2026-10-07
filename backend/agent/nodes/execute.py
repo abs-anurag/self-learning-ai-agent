@@ -3,6 +3,9 @@ Execute node for METIS agent graph.
 
 Source of truth: BLUEPRINT.md §8, §12, §13, §14.
 Dispatches tool calls to ToolRegistry; handles timeouts, policy violations, and errors.
+Enforces loop safety:
+- Terminal reason bypass (prevents running tools when already in terminal failure)
+- Repeated identical failing tool call detection (sets termination_reason = 'repeated_failure')
 Emits tool_started and tool_completed telemetry events.
 """
 
@@ -12,7 +15,7 @@ import uuid
 from typing import Any, Dict, List
 
 from backend.agent.runtime import get_current_runtime
-from backend.agent.state import AgentState
+from backend.agent.state import TERMINAL_REASONS, AgentState
 from backend.core.logging import get_logger
 from backend.events.schema import EventType
 from backend.tools.registry import default_tool_registry
@@ -24,10 +27,20 @@ async def execute_node(state: AgentState) -> dict[str, Any]:
     """
     LangGraph node: execute.
     Determines next action and executes requested tool if needed.
-    Emits tool_started and tool_completed events.
+    Protects against infinite execution and repeated failing calls.
     """
     runtime = get_current_runtime()
     llm = runtime.llm_provider
+
+    termination_reason = state.get("termination_reason")
+    error = state.get("error")
+
+    # 1. Loop safety: If already in a terminal failure reason, bypass execution
+    if termination_reason in TERMINAL_REASONS:
+        logger.info("Terminal reason '%s' present; execute node bypassing tool call.", termination_reason)
+        return {
+            "current_step": "observe",
+        }
 
     step_decision = await llm.decide_step_action(state)
     call_tool = step_decision.get("call_tool", False)
@@ -36,10 +49,50 @@ async def execute_node(state: AgentState) -> dict[str, Any]:
 
     tool_calls = list(state.get("tool_calls", []))
     observations = list(state.get("observations", []))
-    termination_reason = state.get("termination_reason")
-    error = state.get("error")
+    draft_answer = step_decision.get("draft_answer") or step_decision.get("thought", "")
+
+    if not call_tool or not tool_name:
+        if draft_answer:
+            obs_record = {
+                "tool": "direct_reasoning",
+                "parameters": {},
+                "success": True,
+                "output": draft_answer,
+            }
+            observations.append(obs_record)
+        return {
+            "tool_calls": tool_calls,
+            "observations": observations,
+            "final_response": draft_answer if draft_answer else state.get("final_response", ""),
+            "termination_reason": termination_reason,
+            "error": error,
+            "current_step": "observe",
+        }
 
     if call_tool and tool_name:
+        # 2. Loop safety: Check for repeated identical failing tool calls
+        is_repeated_failed_call = any(
+            obs.get("tool") == tool_name
+            and obs.get("parameters") == parameters
+            and obs.get("success") is False
+            for obs in observations
+        )
+        if is_repeated_failed_call:
+            logger.warning(
+                "Repeated identical failing tool call detected: %s with parameters %s",
+                tool_name,
+                parameters,
+            )
+            termination_reason = "repeated_failure"
+            error = f"Identical tool failure occurred repeatedly: {tool_name}"
+            return {
+                "tool_calls": tool_calls,
+                "observations": observations,
+                "termination_reason": termination_reason,
+                "error": error,
+                "current_step": "observe",
+            }
+
         tool_call_id = str(uuid.uuid4())
         tool_call_record = {
             "id": tool_call_id,
@@ -74,6 +127,7 @@ async def execute_node(state: AgentState) -> dict[str, Any]:
 
         obs_record = {
             "tool": tool_name,
+            "parameters": parameters,
             "success": is_success,
             "output": result.get("output", result),
         }
