@@ -173,10 +173,31 @@ class AgentRuntime:
             await self.event_service.publisher.close()
 
 
+from contextvars import ContextVar
+
+_current_runtime_var: ContextVar[Optional[AgentRuntime]] = ContextVar("_current_runtime_var", default=None)
+
+
+def get_current_runtime() -> AgentRuntime:
+    """Retrieve the current AgentRuntime context, creating a default one if unset."""
+    rt = _current_runtime_var.get()
+    if rt is None:
+        rt = AgentRuntime()
+        _current_runtime_var.set(rt)
+    return rt
+
+
+def set_current_runtime(runtime: AgentRuntime) -> None:
+    """Set the current AgentRuntime context."""
+    _current_runtime_var.set(runtime)
+
+
 __all__ = [
     "LLMProvider",
     "AnthropicProvider",
     "FixtureProvider",
     "get_llm_provider",
     "AgentRuntime",
+    "get_current_runtime",
+    "set_current_runtime",
 ]
