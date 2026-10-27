@@ -272,3 +272,7 @@ class GeminiProvider(LLMProvider):
         if raw and raw.strip():
             return {"final_response": raw.strip()}
         return {"final_response": state.get("final_response") or "Task completed successfully."}
+
+    async def generate(self, prompt: str, system: Optional[str] = None) -> str:
+        """Generate standalone completion using Gemini with existing retry and fallback chain."""
+        return await self._call_gemini(prompt, system=system or SYSTEM_PROMPT)

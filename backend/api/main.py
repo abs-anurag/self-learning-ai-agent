@@ -34,6 +34,7 @@ from backend.api.routes.feedback import router as feedback_router
 from backend.api.routes.health import router as health_router
 from backend.api.routes.memory import router as memory_router
 from backend.api.routes.metrics import router as metrics_router
+from backend.api.routes.self_search import router as self_search_router
 from backend.api.routes.tasks import router as tasks_router
 from backend.api.schemas import APIException, ErrorCode
 from backend.api.ws.manager import ws_manager
@@ -183,6 +184,7 @@ def create_app() -> FastAPI:
     app.include_router(memory_router)
     app.include_router(feedback_router)
     app.include_router(metrics_router)
+    app.include_router(self_search_router)
 
     # Register WebSocket endpoint
     app.add_api_websocket_route("/ws/tasks/{task_id}", ws_manager.handle)

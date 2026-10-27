@@ -8,7 +8,7 @@ Provides interface for understand, plan, execute step, reflect, judge, and respo
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from backend.agent.state import AgentState
 
@@ -56,3 +56,10 @@ class LLMProvider(ABC):
         return {
             "final_response": "Task completed.",
         }
+
+    async def generate(self, prompt: str, system: Optional[str] = None) -> str:
+        """
+        Generate standalone text completion from a prompt and optional system instruction.
+        Allows direct LLM invocation without constructing an AgentState graph object.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement generate()")

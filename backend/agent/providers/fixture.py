@@ -523,3 +523,59 @@ class FixtureProvider(LLMProvider):
                 f"This topic involves core analytical and domain principles. "
                 f"Key factors include structural modularity, functional efficiency, and standard architectural best practices."
             )
+
+    async def generate(self, prompt: str, system: Optional[str] = None) -> str:
+        """
+        Generate deterministic standalone response for demo mode and tests.
+        Supports structured JSON Q&A for Self Search prompts.
+        """
+        if hasattr(self, "fixtures") and isinstance(self.fixtures, dict):
+            if "generate" in self.fixtures:
+                val = self.fixtures["generate"]
+                return json.dumps(val) if isinstance(val, dict) else str(val)
+
+        doc_match = re.search(r"<document_content>\s*(.*?)\s*</document_content>", prompt, re.DOTALL)
+        q_match = re.search(r"<question>\s*(.*?)\s*</question>", prompt, re.DOTALL)
+
+        if doc_match and q_match:
+            doc_text = doc_match.group(1).strip()
+            question_text = q_match.group(1).strip()
+            lower_doc = doc_text.lower()
+            lower_q = question_text.lower()
+
+            sentences = [s.strip() for s in re.split(r'[\n.!?]+', doc_text) if len(s.strip()) > 5]
+            best_passage = None
+
+            q_words = [w for w in re.findall(r'\b\w{3,}\b', lower_q) if w not in ("what", "when", "where", "which", "how", "does", "explain", "describe", "document")]
+            scored_sentences = []
+            for s in sentences:
+                s_lower = s.lower()
+                score = sum(1 for w in q_words if w in s_lower)
+                if score > 0:
+                    scored_sentences.append((score, s))
+
+            if scored_sentences:
+                scored_sentences.sort(key=lambda x: x[0], reverse=True)
+                best_passage = scored_sentences[0][1]
+                idx = doc_text.find(best_passage)
+                passage_text = doc_text[idx:idx + len(best_passage)] if idx != -1 else best_passage
+                response_obj = {
+                    "answer": f"According to the document: {passage_text}",
+                    "source_passages": [
+                        {"text": passage_text, "relevance": "direct"}
+                    ],
+                    "confidence": "high",
+                    "is_supported": True,
+                    "explanation": None,
+                }
+            else:
+                response_obj = {
+                    "answer": "The provided document does not contain sufficient information to answer this question.",
+                    "source_passages": [],
+                    "confidence": "unsupported",
+                    "is_supported": False,
+                    "explanation": "No relevant statements answering the question were found in the document content.",
+                }
+            return json.dumps(response_obj)
+
+        return "Deterministic response for demo execution."

@@ -209,3 +209,7 @@ class AnthropicProvider(LLMProvider):
         if raw and raw.strip():
             return {"final_response": raw.strip()}
         return {"final_response": state.get("final_response") or "Task completed successfully."}
+
+    async def generate(self, prompt: str, system: Optional[str] = None) -> str:
+        """Generate standalone completion using Claude with existing async client."""
+        return await self._call_claude(prompt, system=system or SYSTEM_PROMPT)

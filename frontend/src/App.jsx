@@ -4,6 +4,7 @@ import {
 	BrainCircuit,
 	ChevronLeft,
 	ChevronRight,
+	FileSearch,
 	History,
 	Menu,
 	MessageSquareMore,
@@ -24,10 +25,12 @@ import NewChatPage from './pages/NewChatPage'
 import SettingsPage from './pages/SettingsPage'
 import TasksPage from './pages/TasksPage'
 import MemoryPage from './pages/MemoryPage'
+import SelfSearchPage from './pages/SelfSearchPage'
 import { useAgentStore } from './store/agentStore'
 
 const NAVIGATION_ITEMS = [
 	{ id: 'new-chat', label: 'New Chat', icon: MessageSquareMore },
+	{ id: 'self-search', label: 'Self Search', icon: FileSearch },
 	{ id: 'history', label: 'History', icon: History },
 	{ id: 'activity', label: 'Activity', icon: Activity },
 	{ id: 'memory', label: 'Memory', icon: BrainCircuit },
@@ -136,6 +139,7 @@ function App() {
 
 	const mainLabel = {
 		'new-chat': 'New Chat',
+		'self-search': 'Self Search',
 		chat: 'Conversation',
 		history: 'History',
 		activity: 'Activity',
@@ -146,6 +150,8 @@ function App() {
 	const page =
 		activeView === 'new-chat' ? (
 			<NewChatPage onTaskCreated={handleTaskCreated} onEnterVoiceMode={enterVoiceMode} voiceToggleRef={voiceToggleRef} />
+		) : activeView === 'self-search' ? (
+			<SelfSearchPage />
 		) : activeView === 'chat' ? (
 			<ConversationPage onOpenActivity={() => setActiveView('activity')} onEnterVoiceMode={enterVoiceMode} voiceToggleRef={voiceToggleRef} />
 		) : activeView === 'history' ? (
