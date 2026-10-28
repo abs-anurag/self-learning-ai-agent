@@ -49,20 +49,41 @@ function App() {
 
 	useEffect(() => {
 		const finePointer = window.matchMedia('(pointer: fine)')
+		const anyFinePointer = window.matchMedia('(any-pointer: fine)')
 		const hover = window.matchMedia('(hover: hover)')
-		const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+		const anyHover = window.matchMedia('(any-hover: hover)')
+
 		const updateCursorSupport = () => {
-			setDotCursorEnabled(finePointer.matches && hover.matches && !reducedMotion.matches)
+			const hasFine = finePointer.matches || anyFinePointer.matches || hover.matches || anyHover.matches
+			if (hasFine) {
+				setDotCursorEnabled(true)
+			}
 		}
 
 		updateCursorSupport()
-		finePointer.addEventListener('change', updateCursorSupport)
-		hover.addEventListener('change', updateCursorSupport)
-		reducedMotion.addEventListener('change', updateCursorSupport)
+
+		// Dynamically detect real mouse movement (especially for Windows touch laptops and hybrid displays)
+		const onPointerOrMouseMove = (event) => {
+			if (event.pointerType !== 'touch') {
+				setDotCursorEnabled(true)
+			}
+		}
+
+		window.addEventListener('pointermove', onPointerOrMouseMove, { passive: true, once: true })
+		window.addEventListener('mousemove', onPointerOrMouseMove, { passive: true, once: true })
+
+		finePointer.addEventListener?.('change', updateCursorSupport)
+		anyFinePointer.addEventListener?.('change', updateCursorSupport)
+		hover.addEventListener?.('change', updateCursorSupport)
+		anyHover.addEventListener?.('change', updateCursorSupport)
+
 		return () => {
-			finePointer.removeEventListener('change', updateCursorSupport)
-			hover.removeEventListener('change', updateCursorSupport)
-			reducedMotion.removeEventListener('change', updateCursorSupport)
+			window.removeEventListener('pointermove', onPointerOrMouseMove)
+			window.removeEventListener('mousemove', onPointerOrMouseMove)
+			finePointer.removeEventListener?.('change', updateCursorSupport)
+			anyFinePointer.removeEventListener?.('change', updateCursorSupport)
+			hover.removeEventListener?.('change', updateCursorSupport)
+			anyHover.removeEventListener?.('change', updateCursorSupport)
 		}
 	}, [])
 
@@ -323,7 +344,7 @@ function App() {
 					<div className="tornado-background" aria-hidden="true">
 						<Tornado
 							background="transparent"
-							speed={4}
+							speed={10}
 							zoom={85}
 							lineOptions={{ count: 80, color: '#e8e8e8', glow: 2.5 }}
 							dotOptions={{ count: 700, size: 8, color: '#cfcfcf', glow: 1.2, flicker: 2 }}

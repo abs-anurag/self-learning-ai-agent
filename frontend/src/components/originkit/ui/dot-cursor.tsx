@@ -139,14 +139,16 @@ export default function DotCursor(props: Props) {
             const rect = host.getBoundingClientRect();
             const sx = rect.width > 0 ? host.clientWidth / rect.width : 1;
             const sy = rect.height > 0 ? host.clientHeight / rect.height : 1;
+            const winW = window.innerWidth || rect.width || rect.right;
+            const winH = window.innerHeight || rect.height || rect.bottom;
             return {
                 x: (clientX - rect.left) * sx,
                 y: (clientY - rect.top) * sy,
                 over:
-                    clientX >= rect.left &&
-                    clientX <= rect.right &&
-                    clientY >= rect.top &&
-                    clientY <= rect.bottom,
+                    clientX >= -2 &&
+                    clientX <= winW + 2 &&
+                    clientY >= -2 &&
+                    clientY <= winH + 2,
             };
         };
 
@@ -225,7 +227,8 @@ export default function DotCursor(props: Props) {
             hideNativeCursor(false);
         };
 
-        const onMove = (e: PointerEvent) => {
+        const onMove = (e: PointerEvent | MouseEvent) => {
+            if ("pointerType" in e && e.pointerType === "touch") return;
             const pt = localize(e.clientX, e.clientY);
             if (!pt.over) {
                 if (inside) exitTo(pt.x, pt.y);
@@ -244,8 +247,10 @@ export default function DotCursor(props: Props) {
         const onWindowLeave = () => {
             if (inside) exitTo(targetX, targetY);
         };
-        window.addEventListener("pointermove", onMove, { passive: true });
+        window.addEventListener("pointermove", onMove as EventListener, { passive: true });
+        window.addEventListener("mousemove", onMove as EventListener, { passive: true });
         document.documentElement.addEventListener("pointerleave", onWindowLeave);
+        document.documentElement.addEventListener("mouseleave", onWindowLeave);
 
         let ro: ResizeObserver | null = null;
         if (typeof ResizeObserver !== "undefined") {
@@ -409,11 +414,16 @@ export default function DotCursor(props: Props) {
         return () => {
             cancelAnimationFrame(raf);
             hideNativeCursor(false);
-            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointermove", onMove as EventListener);
+            window.removeEventListener("mousemove", onMove as EventListener);
             window.removeEventListener("resize", resize);
             ro?.disconnect();
             document.documentElement.removeEventListener(
                 "pointerleave",
+                onWindowLeave
+            );
+            document.documentElement.removeEventListener(
+                "mouseleave",
                 onWindowLeave
             );
         };

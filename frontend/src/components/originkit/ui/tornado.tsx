@@ -992,6 +992,17 @@ function createVortex(
 
     if (!cfg.running) {
       if (!heldFrame) {
+        syncColors(cfg);
+        const fov = fovForZoom(cfg.zoom);
+        if (camera.fov !== fov) {
+          camera.fov = fov;
+          camera.updateProjectionMatrix();
+        }
+        if (strandGeo) {
+          for (const strand of strands) drawStrand(strand, 5, 1);
+          (strandGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+          (strandGeo.attributes.color as THREE.BufferAttribute).needsUpdate = true;
+        }
         renderer.render(scene, camera);
         heldFrame = true;
       }
@@ -1157,7 +1168,9 @@ export default function Vortex(props: VortexProps) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
 
   const reducedMotion = useReducedMotion();
-  const running = !reducedMotion;
+  // Under reduced-motion, maintain gentle calm movement instead of a broken blank freeze
+  const effectiveSpeed = reducedMotion ? Math.min(speed, 2.5) : speed;
+  const running = true;
 
   const line = { ...DEFAULTS.lineOptions, ...lineOptions };
   const dot = { ...DEFAULTS.dotOptions, ...dotOptions };
@@ -1174,7 +1187,7 @@ export default function Vortex(props: VortexProps) {
     zoom,
 
     flowDir: direction === "left" ? -1 : 1,
-    flowSpeed: (speed / 100) * (direction === "left" ? -1 : 1),
+    flowSpeed: (effectiveSpeed / 100) * (direction === "left" ? -1 : 1),
     lineCount: line.count,
     lineColor: line.color,
     lineGlow: (line.glow / 10) * LINE_GLOW_MAX,

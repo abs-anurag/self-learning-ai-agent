@@ -66,12 +66,13 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: SecretStr = SecretStr(
         "gemini-placeholder-key-do-not-commit"
     )
-    GEMINI_MODEL: str = "gemini-3.8-flash"
+    GEMINI_MODEL: str = "gemini-flash-lite-latest"
     GEMINI_FALLBACK_MODELS: list[str] = Field(
         default_factory=lambda: [
-            "gemini-3.5-flash",
-            "gemini-flash-lite-latest",
-            "gemini-flash-latest",
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash-lite",
+            "gemini-3-flash-preview",
+            "gemini-3.8-flash",
         ]
     )
 
